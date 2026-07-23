@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#003453">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Delivery Verification">
+<title>Delivery Verification Checklist — LiRo-Hill</title>
+<style>
+  /* ============ LiRo-Hill design tokens (from the design system) ============ */
+  @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@500;600;700;800&family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap');
+  :root{
+    /* colors */
+    --liro-blue:#006BAC;
+    --liro-blue-bright:#1B85C9;
+    --liro-blue-dark:#004E7C;
+    --liro-blue-deep:#003453;
+    --liro-navy:#00263A;
+    --white:#FFFFFF;
+    --gray-50:#F5F7F9;
+    --gray-100:#EBEFF3;
+    --gray-200:#DCE3E9;
+    --gray-300:#C3CDD6;
+    --gray-400:#9AA7B2;
+    --gray-500:#6B7A87;
+    --gray-600:#4A5661;
+    --gray-700:#33404A;
+    --gray-800:#212C34;
+    --gray-900:#14202B;
+    --success:#2E8B57;
+    --success-bg:#E6F2EB;
+    --warning:#C77700;
+    --warning-bg:#FBF0DE;
+    --error:#C0392B;
+    --error-bg:#F8E7E4;
+    --info:var(--liro-blue);
+    --info-bg:#E4F0F8;
+    --text-body:var(--gray-700);
+    --text-link:var(--liro-blue);
+    --text-link-hover:var(--liro-blue-dark);
+    --focus-ring:rgba(0,107,172,.35);
+    /* typography */
+    --font-display:'Barlow',system-ui,sans-serif;
+    --font-body:'Public Sans',system-ui,sans-serif;
+    --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+
+  body{margin:0;background:var(--gray-50);font-family:var(--font-body);color:var(--text-body)}
+  a{color:var(--text-link)}a:hover{color:var(--text-link-hover)}
+  input::placeholder,textarea::placeholder{color:var(--gray-400)}
+  input,textarea,button{font-family:inherit}
+
+  .wrap{max-width:780px;margin:0 auto;padding:24px 16px 64px}
+
+  /* ---- Header banner ---- */
+  .banner{background:var(--liro-blue-deep);border-radius:8px;padding:20px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .banner-inner{display:flex;flex-direction:column;gap:6px}
+  .banner-logo{height:26px;width:auto;align-self:flex-start}
+  .banner-logo path,.banner-logo rect,.banner-logo polygon{fill:#fff}
+  .banner-title{font-family:var(--font-display);font-weight:700;font-size:18px;line-height:1.2;color:#fff;letter-spacing:-.01em}
+  .banner-sub{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.7)}
+
+  /* ---- Cards ---- */
+  .card{background:#fff;border:1px solid var(--gray-200);border-radius:8px;box-shadow:0 1px 3px rgba(0,38,58,.06);padding:20px 24px;margin-top:16px}
+  .card.accent{border-top:3px solid var(--liro-blue)}
+  .card-title{font-family:var(--font-display);font-weight:700;font-size:15px;color:var(--gray-900);letter-spacing:.06em;text-transform:uppercase}
+  .card-hint{font-size:12px;color:var(--gray-500);margin-top:2px}
+
+  /* ---- Header fields grid ---- */
+  .hgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px 16px;margin-top:14px}
+  .field{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--gray-600)}
+  .field input{border:1px solid var(--gray-300);border-radius:5px;padding:9px 10px;font-size:14px;color:var(--gray-900);background:#fff;outline:none}
+  .field input:focus{border-color:var(--liro-blue);box-shadow:0 0 0 3px var(--focus-ring)}
+
+  /* ---- Check groups ---- */
+  .group{margin-top:16px}
+  .group-name{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--liro-blue)}
+  .check-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--gray-100)}
+  .check-label{font-size:13.5px;color:var(--gray-800);flex:1 1 260px;min-width:200px}
+  .opts{display:flex;gap:6px}
+  .opts.wrap-opts{flex-wrap:wrap;align-items:center}
+
+  /* ---- Option buttons (44px min — glove-friendly touch targets) ---- */
+  .opt{min-height:44px;padding:9px 16px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--gray-300);background:#fff;color:var(--gray-600)}
+  .opt:active{transform:translateY(1px)}
+  .opt.on-good{background:var(--success-bg);border-color:var(--success);color:var(--success)}
+  .opt.on-bad{background:var(--error-bg);border-color:var(--error);color:var(--error)}
+  .opt.on-na{background:var(--gray-100);border-color:var(--gray-500);color:var(--gray-700)}
+
+  /* ---- Parameters ---- */
+  .param{padding:14px 0;border-bottom:1px solid var(--gray-100);display:flex;flex-direction:column;gap:10px}
+  .param-label{font-size:14px;font-weight:600;color:var(--gray-900)}
+  .param input.observed{border:1px solid var(--gray-300);border-radius:5px;padding:9px 10px;font-size:14px;font-family:var(--font-mono);color:var(--gray-900);outline:none;max-width:340px}
+  .param input.observed:focus{border-color:var(--liro-blue);box-shadow:0 0 0 3px var(--focus-ring)}
+
+  /* ---- Photos ---- */
+  .photo-item{padding:14px 0;border-bottom:1px solid var(--gray-100)}
+  .photo-label{font-size:14px;font-weight:600;color:var(--gray-900);margin-bottom:10px}
+  .photo-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start}
+  .thumb{position:relative;width:96px;height:96px;border-radius:5px;border:1px solid var(--gray-300);background-size:cover;background-position:center}
+  .thumb .rm{position:absolute;top:2px;right:2px;width:26px;height:26px;border-radius:50%;background:rgba(0,38,58,.72);color:#fff;border:none;font-size:15px;line-height:26px;text-align:center;cursor:pointer;padding:0}
+  .add-photo{width:96px;height:96px;border:1.5px dashed var(--gray-400);border-radius:5px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;color:var(--liro-blue);font-size:11.5px;font-weight:600;background:var(--gray-50)}
+  .add-photo:hover{border-color:var(--liro-blue);background:var(--info-bg)}
+  .add-photo .plus{font-size:22px;line-height:1;font-weight:400}
+
+  /* ---- Verification ---- */
+  .vgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;margin-top:14px}
+  .vcol{display:flex;flex-direction:column;gap:10px}
+
+  /* ---- Submit / export ---- */
+  .export-wrap{margin-top:20px;display:flex;flex-direction:column;align-items:center;gap:8px}
+  .export-btn{background:var(--liro-blue);color:#fff;border:none;border-radius:5px;padding:13px 32px;font-size:15px;font-weight:700;font-family:var(--font-display);letter-spacing:.02em;cursor:pointer;box-shadow:0 1px 3px rgba(0,38,58,.2)}
+  .export-btn:hover{background:var(--liro-blue-dark)}
+  .export-btn:active{transform:translateY(1px)}
+  .export-btn:disabled{opacity:.5;cursor:not-allowed}
+  .export-hint{font-size:12px;color:var(--gray-500)}
+  .csv-link{background:none;border:none;padding:4px;font-size:12.5px;font-weight:600;color:var(--liro-blue);cursor:pointer;text-decoration:underline}
+  .csv-link:hover{color:var(--liro-blue-dark)}
+
+  /* ---- Status + toast ---- */
+  .status{display:none;font-size:14px;font-weight:600;line-height:1.4;padding:10px 14px;border-radius:5px;max-width:420px}
+  .status.err{display:block;background:var(--error-bg);color:var(--error)}
+  .field input.invalid{border-color:var(--error)}
+  .needs-answer{background:var(--warning-bg)}
+  .toast{position:fixed;top:24px;left:50%;transform:translateX(-50%);background:var(--liro-navy);color:#fff;padding:12px 20px;border-radius:5px;display:none;align-items:center;gap:8px;font-size:14px;font-weight:600;box-shadow:0 12px 28px rgba(0,38,58,.12),0 4px 8px rgba(0,38,58,.06);z-index:100}
+  .toast.show{display:flex}
+  .toast svg{width:18px;height:18px;flex:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="banner">
+    <div class="banner-inner">
+      <svg class="banner-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 145.87 48" aria-label="LiRo-Hill">
+        <path d="M24.97,17.65c0-1.25-2.53-3.52-4.88-3.8v7.32s4.88-1.26,4.88-3.52Z"></path>
+        <path d="M9.69,32.37c2.05,1.78,4.72,2.87,7.65,2.87s5.6-1.09,7.65-2.87h-15.29Z"></path>
+        <path d="M26.35,26.86c.7.26.93-.12,1.08-.47.15-.35.29-1.11.37-1.88.03-.23.07-.8.07-1.26h1.11c-.05-1.68-.45-3.27-1.13-4.7-1.65,2.03-3.12,2.98-3.59,3.27-.48.29-1.37.85-2.72,1.44,0,0,1.92,1.63,2.34,1.99.42.36,1.61,1.29,2.47,1.62Z"></path>
+        <path d="M17.32,36.19c3.49,0,6.64-1.41,8.93-3.7,2.29-2.29,3.7-5.44,3.7-8.93s-1.41-6.64-3.7-8.93c-2.29-2.29-5.44-3.7-8.93-3.7-3.49,0-6.64,1.41-8.93,3.7-2.29,2.29-3.7,5.44-3.7,8.93,0,3.49,1.41,6.64,3.7,8.93,2.29,2.29,5.44,3.7,8.93,3.7ZM17.34,11.43c6.71,0,12.15,5.44,12.15,12.15,0,6.71-5.44,12.15-12.15,12.15s-12.15-5.44-12.15-12.15c0-6.71,5.44-12.15,12.15-12.15Z"></path>
+        <path d="M15.56,12.7v10.39c0,.86.1,1.28.4,1.44.13.07.59.16.59.16v1.23h-4.32v-1.23s.45-.04.72-.26c.27-.27.31-.68.31-1.34v-9.23c0-.62-.23-.9-.44-1.04-.58.24-1.13.54-1.65.87v16.23h15.95c.09-.14.18-.29.27-.44-.39-.06-1.13-.2-1.63-.41-1.07-.44-2.04-1.17-2.75-1.65-.63-.42-2.28-1.72-2.9-2.34v1.08c0,.62.52.65.69.7v1.69h-4.23v-1.69c.9-.1.83-.7.83-1.51v-13.42s-.03,0-.05,0c-.45,0-.9.03-1.33.08-.25.2-.44.48-.44.7Z"></path>
+        <path d="M0,48h48V0H0v48ZM17.32,10.45c2,0,3.89.46,5.59,1.26h8.99v6h6.1v-6h5.81v24.97h-5.81v-17.23h-6v17.23h-12v-.28c-.86.18-1.75.27-2.67.27-7.24,0-13.11-5.87-13.11-13.12s5.87-13.11,13.11-13.11Z"></path>
+        <path d="M8.59,15.88c-1.81,2.05-2.92,4.74-2.92,7.7,0,2.95,1.11,5.64,2.92,7.7v-15.39Z"></path>
+        <polygon points="57.05 11.65 52.95 11.65 52.95 31.25 63.19 31.25 63.19 27.99 57.05 27.99 57.05 11.65"></polygon>
+        <rect x="65.11" y="17.54" width="3.83" height="13.71"></rect>
+        <rect x="65.11" y="11.65" width="3.83" height="3.01"></rect>
+        <path d="M80.97,21.64v-.05c2.66-.43,3.64-2.31,3.64-4.81,0-3.34-1.79-5.13-4.59-5.13h-7.57v19.6h4.1v-8.12h1.06c3.15,0,2.93,1.98,2.93,4.32,0,1.28-.11,2.61.43,3.8h4.02c-.38-.82-.46-4.51-.46-5.76,0-3.53-2.66-3.75-3.56-3.86ZM78.36,20.12h-1.82v-5.46h1.82c1.3,0,2.09.71,2.09,2.58,0,1.25-.46,2.88-2.09,2.88Z"></path>
+        <path d="M92.69,17.27c-5.05,0-5.59,3.2-5.59,6.95,0,4.29.65,7.3,5.59,7.3s5.59-3.01,5.59-7.3c0-3.75-.54-6.95-5.59-6.95ZM92.69,29.08c-1.41,0-1.76-.9-1.76-5.08,0-2.85.14-4.29,1.76-4.29s1.76,1.44,1.76,4.29c0,4.18-.35,5.08-1.76,5.08Z"></path>
+        <rect x="100.67" y="22.54" width="6.65" height="2.77"></rect>
+        <polygon points="114.47 22.51 119.16 22.51 119.16 31.25 123.26 31.25 123.26 11.65 119.16 11.65 119.16 19.49 114.47 19.49 114.47 11.65 110.36 11.65 110.36 31.25 114.47 31.25 114.47 22.51"></polygon>
+        <rect x="126.95" y="17.54" width="3.83" height="13.71"></rect>
+        <rect x="126.95" y="11.65" width="3.83" height="3.01"></rect>
+        <rect x="134.5" y="11.65" width="3.83" height="19.6"></rect>
+        <rect x="142.05" y="11.65" width="3.83" height="19.6"></rect>
+      </svg>
+      <div class="banner-title">Material Delivery Verification Checklist</div>
+      <div class="banner-sub">AHU / Mechanical Equipment</div>
+    </div>
+  </div>
+
+  <div class="card accent">
+    <div class="card-title">Header</div>
+    <div class="hgrid" id="header-grid"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Identity · Condition · Documents</div>
+    <div class="card-hint">Check one result for each item.</div>
+    <div id="check-groups"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Parameter Verification</div>
+    <div class="card-hint">Check one for each — write the observed value only when Other.</div>
+    <div id="params"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Photos</div>
+    <div class="card-hint">Add photos for each item. Tap × on a photo to remove it.</div>
+    <div id="photos"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="margin-bottom:14px">Verification</div>
+    <div class="vgrid">
+      <div class="vcol">
+        <div class="group-name">LiRo-Hill Verifier</div>
+        <label class="field">Printed name
+          <input type="text" id="liro-name">
+        </label>
+        <label class="field">Date
+          <input type="date" id="liro-date">
+        </label>
+      </div>
+      <div class="vcol">
+        <div class="group-name">Contractor Representative</div>
+        <label class="field">Printed name / company
+          <input type="text" id="con-name">
+        </label>
+        <div class="opts wrap-opts" id="con-options"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="export-wrap">
+    <div class="status" id="status-msg"></div>
+    <button class="export-btn" id="submit-btn" type="button">Submit Verification</button>
+    <div class="export-hint">Saves to the verification log — photos and a PDF record are filed automatically.</div>
+    <button class="csv-link" id="export-btn" type="button">Download CSV instead (offline backup)</button>
+  </div>
+</div>
+
+<div class="toast" id="saved-toast">
+  <!-- lucide: check-circle-2 -->
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="10"></circle>
+    <path d="m9 12 2 2 4-4"></path>
+  </svg>
+  Saved
+</div>
+
+<script>
+/* ==========================================================================
+   CONFIG — the ONLY thing to edit at deploy time.
+   Paste the Google Apps Script Web App URL between the quotes.
+   It looks like: https://script.google.com/macros/s/AKfycb.../exec
+   ========================================================================== */
+var CONFIG = {
+  SCRIPT_URL: "https://script.google.com/macros/s/AKfycbyYeQuofIXdU4blUIAZ70dYx9XI9bQWPxQIyCAAccmKTnDwSS40bgaMBD8wTrMo84E/exec"
+};
+/* ========================================================================== */
+
+(function () {
+  'use strict';
+
+  /* ============ State ============ */
+  var state = {
+    header: { project:'', phase:'', materialId:'', recordId:'V-', submittal:'', model:'', date:'', location:'' },
+    checks: { Identity:[null,null,null], Condition:[null,null,null], Documents:[null,null,null] },
+    params: [ {observed:'',result:null}, {observed:'',result:null}, {observed:'',result:null} ],
+    photos: [[],[],[],[]],
+    liro: { name:'', date:'' },
+    con: { name:'', status:null }
+  };
+
+  /* ============ Definitions ============ */
+  var headerDefs = [
+    ['project','Project','text',''], ['phase','Phase # – Trade / FMS No.','text',''],
+    ['materialId','Material ID','text',''], ['recordId','Verification Record ID','text','V-'],
+    ['submittal','Submittal No.','text',''], ['model','Approved Model No.','text',''],
+    ['date','Delivery date','date',''], ['location','Install location','text','']
+  ];
+
+  var groupDefs = {
+    Identity: ['Nameplate manufacturer, model and serial match the approved submittal',
+               'Configuration / hand / orientation matches approved drawings',
+               'Quantity delivered matches PO and packing slip'],
+    Condition: ['No visible shipping damage',
+                'Shipping protection / wrapping intact on arrival',
+                'Loose-shipped parts inventoried against packing list'],
+    Documents: ['Packing slip / bill of lading / delivery ticket',
+                'Factory test report / certificate of compliance (as specified)',
+                'Installation instructions required before installation']
+  };
+
+  var resKinds = { 'Pass':'good', 'Fail':'bad', 'N/A':'na' };
+  var pKinds = { 'Match':'good', "Doesn't Match":'bad', 'N/A':'na', 'Other':'na' };
+  var conKinds = { 'Signed':'good', 'Unavailable':'na', 'Declined':'bad' };
+
+  // Set after the first Submit tap on a half-finished form: highlights the
+  // unanswered rows until they're answered or the form is submitted anyway.
+  var showNeeds = false;
+  var incompleteWarned = 0;
+  var paramLabels = ['Example parameter 1','Example parameter 2','Example parameter 3'];
+  var photoLabels = ['Nameplate photographed','All sides / connections photographed','Packing slip / bill of lading / delivery ticket photographed','Any damage or discrepancy photographed'];
+
+  /* ============ Helpers ============ */
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  function optButton(label, kind, isActive, onClick) {
+    var b = el('button', 'opt' + (isActive ? ' on-' + kind : ''), label);
+    b.type = 'button';
+    b.addEventListener('click', function () { onClick(); schedulePersist(); });
+    return b;
+  }
+
+  /* Compress photos client-side to keep POSTs small. Equipment shots use
+     the field-app limits (1600px / 0.7); the packing-slip section gets more
+     resolution so fine print on a BOL stays legible. Indexed like
+     photoLabels: nameplate, sides, packing slip, damage. */
+  var photoCompress = [
+    { edge: 1600, q: 0.7 },
+    { edge: 1600, q: 0.7 },
+    { edge: 2200, q: 0.8 },
+    { edge: 1600, q: 0.7 }
+  ];
+  function compressImage(f, maxEdge, quality, onDone, onError) {
+    var img = new Image();
+    var url = URL.createObjectURL(f);
+    img.onload = function () {
+      URL.revokeObjectURL(url);
+      var w = img.width, h = img.height;
+      var long = Math.max(w, h);
+      if (long > maxEdge) {
+        var scale = maxEdge / long;
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+      var canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      onDone(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); onError(); };
+    img.src = url;
+  }
+
+  /* ============ Draft persistence ============
+     The form survives a locked phone, a killed tab, or an accidental
+     refresh: state is saved to localStorage as it changes, restored on
+     load, and cleared only after a successful submit. */
+  var DRAFT_KEY = 'dv-draft';
+  var SID_KEY = 'dv-sid';
+  var persistTimer = null;
+
+  function schedulePersist() {
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(saveDraft, 500);
+  }
+
+  function saveDraft() {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(state));
+    } catch (e) {
+      // Quota exceeded (photos too big) — keep at least the typed fields.
+      try {
+        var slim = JSON.parse(JSON.stringify(state));
+        slim.photos = [[],[],[],[]];
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(slim));
+      } catch (e2) { /* private mode etc. — drafts just don't persist */ }
+    }
+  }
+
+  function loadDraft() {
+    try {
+      var d = JSON.parse(localStorage.getItem(DRAFT_KEY));
+      if (!d || !d.header) return;
+      Object.assign(state.header, d.header);
+      if (d.checks) state.checks = d.checks;
+      if (d.params) state.params = d.params;
+      if (d.photos) state.photos = d.photos;
+      Object.assign(state.liro, d.liro || {});
+      Object.assign(state.con, d.con || {});
+    } catch (e) { /* corrupt draft — start fresh */ }
+  }
+
+  function clearDraft() {
+    try {
+      localStorage.removeItem(DRAFT_KEY);
+      localStorage.removeItem(SID_KEY);
+    } catch (e) {}
+  }
+
+  /* ============ Smart defaults ============
+     Same person, same project, every day: remember Project, Phase, and the
+     verifier's name across submissions, and pre-fill today's dates. Only
+     blanks are filled — anything typed or restored from a draft wins. */
+  var DEFAULTS_KEY = 'dv-defaults';
+
+  function todayStr() {
+    var d = new Date();
+    return d.getFullYear() + '-' +
+      ('0' + (d.getMonth() + 1)).slice(-2) + '-' +
+      ('0' + d.getDate()).slice(-2);
+  }
+
+  function applyDefaults() {
+    var def = {};
+    try { def = JSON.parse(localStorage.getItem(DEFAULTS_KEY)) || {}; } catch (e) {}
+    if (!state.header.project && def.project) state.header.project = def.project;
+    if (!state.header.phase && def.phase) state.header.phase = def.phase;
+    if (!state.liro.name && def.liroName) state.liro.name = def.liroName;
+    if (!state.header.date) state.header.date = todayStr();
+    if (!state.liro.date) state.liro.date = todayStr();
+  }
+
+  function saveDefaults() {
+    try {
+      localStorage.setItem(DEFAULTS_KEY, JSON.stringify({
+        project: state.header.project.trim(),
+        phase: state.header.phase.trim(),
+        liroName: state.liro.name.trim()
+      }));
+    } catch (e) {}
+  }
+
+  /* ============ Header fields ============ */
+  function renderHeader() {
+    var grid = document.getElementById('header-grid');
+    grid.innerHTML = '';
+    headerDefs.forEach(function (d) {
+      var key = d[0], label = d[1], type = d[2], ph = d[3];
+      var lab = el('label', 'field', label);
+      var input = document.createElement('input');
+      input.id = 'hf-' + key;
+      input.type = type;
+      input.value = state.header[key];
+      if (ph) input.placeholder = ph;
+      input.addEventListener('input', function () {
+        state.header[key] = input.value;
+        input.classList.remove('invalid');
+        schedulePersist();
+      });
+      lab.appendChild(input);
+      grid.appendChild(lab);
+    });
+  }
+
+  /* ============ Check groups ============ */
+  function renderChecks() {
+    var host = document.getElementById('check-groups');
+    host.innerHTML = '';
+    Object.keys(groupDefs).forEach(function (g) {
+      var box = el('div', 'group');
+      box.appendChild(el('div', 'group-name', g));
+      groupDefs[g].forEach(function (label, i) {
+        var row = el('div', 'check-row' + (showNeeds && !state.checks[g][i] ? ' needs-answer' : ''));
+        row.appendChild(el('div', 'check-label', label));
+        var opts = el('div', 'opts');
+        ['Pass','Fail','N/A'].forEach(function (r) {
+          opts.appendChild(optButton(r, resKinds[r], state.checks[g][i] === r, function () {
+            state.checks[g][i] = state.checks[g][i] === r ? null : r;
+            renderChecks();
+          }));
+        });
+        row.appendChild(opts);
+        box.appendChild(row);
+      });
+      host.appendChild(box);
+    });
+  }
+
+  /* ============ Parameters ============ */
+  function renderParams() {
+    var host = document.getElementById('params');
+    host.innerHTML = '';
+    state.params.forEach(function (p, i) {
+      var box = el('div', 'param' + (showNeeds && !p.result ? ' needs-answer' : ''));
+      box.appendChild(el('div', 'param-label', paramLabels[i]));
+
+      var opts = el('div', 'opts wrap-opts');
+      ['Match',"Doesn't Match",'N/A','Other'].forEach(function (r) {
+        opts.appendChild(optButton(r, pKinds[r], p.result === r, function () {
+          p.result = p.result === r ? null : r;
+          renderParams();
+        }));
+      });
+      box.appendChild(opts);
+
+      // Observed value is only written when Other is selected — Match /
+      // Doesn't Match / N/A are tap-only, nothing to type.
+      if (p.result === 'Other') {
+        var obs = document.createElement('input');
+        obs.type = 'text';
+        obs.className = 'observed';
+        obs.placeholder = 'Observed value / explanation';
+        obs.value = p.observed;
+        obs.addEventListener('input', function () { p.observed = obs.value; schedulePersist(); });
+        box.appendChild(obs);
+      }
+      host.appendChild(box);
+    });
+  }
+
+  /* ============ Photos ============ */
+  function renderPhotos() {
+    var host = document.getElementById('photos');
+    host.innerHTML = '';
+    photoLabels.forEach(function (label, i) {
+      var box = el('div', 'photo-item');
+      box.appendChild(el('div', 'photo-label', label));
+      var row = el('div', 'photo-row');
+
+      state.photos[i].forEach(function (src, j) {
+        var t = el('div', 'thumb');
+        t.style.backgroundImage = "url('" + src + "')";
+        var rm = el('button', 'rm', '×');
+        rm.type = 'button';
+        rm.setAttribute('aria-label', 'Remove photo ' + (j + 1));
+        rm.addEventListener('click', function () {
+          state.photos[i].splice(j, 1);
+          renderPhotos();
+          schedulePersist();
+        });
+        t.appendChild(rm);
+        row.appendChild(t);
+      });
+
+      var inputId = 'photo-file-' + i;
+      var add = el('label', 'add-photo');
+      add.htmlFor = inputId;
+      var plus = el('span', 'plus', '+'); add.appendChild(plus);
+      add.appendChild(el('span', null, 'Add photo'));
+      row.appendChild(add);
+
+      var file = document.createElement('input');
+      file.id = inputId;
+      file.type = 'file';
+      file.accept = 'image/*';
+      file.setAttribute('capture', 'environment');
+      file.multiple = true;
+      file.style.display = 'none';
+      file.addEventListener('change', function () {
+        var files = Array.prototype.slice.call(file.files || []);
+        files.forEach(function (f) {
+          compressImage(f, photoCompress[i].edge, photoCompress[i].q, function (dataUrl) {
+            state.photos[i].push(dataUrl);
+            renderPhotos();
+            schedulePersist();
+          }, function () {
+            showStatus('err', "Couldn't read one of the photos — try again.");
+          });
+        });
+        file.value = '';
+      });
+      row.appendChild(file);
+
+      box.appendChild(row);
+      host.appendChild(box);
+    });
+  }
+
+  /* ============ Verification ============ */
+  function renderCon() {
+    var host = document.getElementById('con-options');
+    host.innerHTML = '';
+    ['Signed','Unavailable','Declined'].forEach(function (r) {
+      host.appendChild(optButton(r, conKinds[r], state.con.status === r, function () {
+        state.con.status = state.con.status === r ? null : r;
+        renderCon();
+      }));
+    });
+  }
+
+  document.getElementById('liro-name').addEventListener('input', function (e) { state.liro.name = e.target.value; schedulePersist(); });
+  document.getElementById('liro-date').addEventListener('input', function (e) { state.liro.date = e.target.value; schedulePersist(); });
+  document.getElementById('con-name').addEventListener('input', function (e) { state.con.name = e.target.value; schedulePersist(); });
+
+  /* ============ CSV export ============ */
+  function exportCsv() {
+    var s = state;
+    var q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+    var rows = [['Section','Item','Result','Value / Notes']];
+    var h = s.header;
+    rows.push(['Header','Project','',h.project],['Header','Phase # - Trade / FMS No.','',h.phase],
+      ['Header','Material ID','',h.materialId],['Header','Verification Record ID','',h.recordId],
+      ['Header','Submittal No.','',h.submittal],['Header','Approved Model No.','',h.model],
+      ['Header','Delivery date','',h.date],['Header','Install location','',h.location]);
+    Object.keys(groupDefs).forEach(function (g) {
+      groupDefs[g].forEach(function (label, i) {
+        rows.push([g, label, s.checks[g][i] || '', '']);
+      });
+    });
+    s.params.forEach(function (p, i) {
+      rows.push(['Parameters', paramLabels[i],
+        p.result || '', p.result === 'Other' ? p.observed : '']);
+    });
+    photoLabels.forEach(function (label, i) {
+      rows.push(['Photos', label, '', s.photos[i].length + ' photo(s) attached']);
+    });
+    rows.push(['Verification','LiRo-Hill Verifier','',s.liro.name],
+      ['Verification','LiRo-Hill Verifier date','',s.liro.date],
+      ['Verification','Contractor representative','',s.con.name],
+      ['Verification','Contractor acknowledgment',s.con.status || '','']);
+    var csv = rows.map(function (r) { return r.map(q).join(','); }).join('\r\n');
+    var blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    var id = (s.header.materialId || 'record').replace(/[^\w-]+/g, '_');
+    a.download = 'Delivery_Verification_' + id + (s.header.date ? '_' + s.header.date : '') + '.csv';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+  }
+  document.getElementById('export-btn').addEventListener('click', exportCsv);
+
+  /* ============ Submit → Apps Script backend ============ */
+  var submitBtn = document.getElementById('submit-btn');
+  var statusMsg = document.getElementById('status-msg');
+  var toastTimer = null;
+
+  function showStatus(kind, text) {
+    statusMsg.className = 'status ' + kind;
+    statusMsg.textContent = text;
+  }
+  function clearStatus() {
+    statusMsg.className = 'status';
+    statusMsg.textContent = '';
+  }
+
+  function showSaved() {
+    var toast = document.getElementById('saved-toast');
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 2000);
+    saveDefaults();   // remember project / phase / verifier before the reset
+    clearDraft();
+    resetForm();
+  }
+
+  function resetForm() {
+    state.header = { project:'', phase:'', materialId:'', recordId:'V-', submittal:'', model:'', date:'', location:'' };
+    state.checks = { Identity:[null,null,null], Condition:[null,null,null], Documents:[null,null,null] };
+    state.params = [ {observed:'',result:null}, {observed:'',result:null}, {observed:'',result:null} ];
+    state.photos = [[],[],[],[]];
+    state.liro = { name:'', date:'' };
+    state.con = { name:'', status:null };
+    showNeeds = false;
+    incompleteWarned = 0;
+    applyDefaults();
+    renderHeader(); renderChecks(); renderParams(); renderPhotos(); renderCon();
+    document.getElementById('liro-name').value = state.liro.name;
+    document.getElementById('liro-date').value = state.liro.date;
+    document.getElementById('con-name').value = state.con.name;
+    clearStatus();
+    window.scrollTo({ top: 0 });
+  }
+
+  function buildPayload() {
+    var s = state;
+    // strip the data-URL prefix; the server decodes plain base64
+    var b64 = function (arr) { return arr.map(function (d) { return d.split(',')[1]; }); };
+    return {
+      header: {
+        project: s.header.project.trim(),
+        phase: s.header.phase.trim(),
+        materialId: s.header.materialId.trim(),
+        recordId: s.header.recordId.trim(),
+        submittal: s.header.submittal.trim(),
+        model: s.header.model.trim(),
+        date: s.header.date,
+        location: s.header.location.trim()
+      },
+      checks: s.checks,
+      params: s.params.map(function (p) {
+        // observed only travels with Other — the tap-only results send no text
+        return { observed: p.result === 'Other' ? p.observed.trim() : '', result: p.result };
+      }),
+      photos: { nameplate: b64(s.photos[0]), sides: b64(s.photos[1]), packingSlip: b64(s.photos[2]), damage: b64(s.photos[3]) },
+      // The app is the single source of truth for wording — the server uses
+      // these for the PDF and processing, so renaming an item or parameter
+      // here never requires touching or redeploying the script.
+      labels: { checks: groupDefs, params: paramLabels, photos: photoLabels },
+      liro: { name: s.liro.name.trim(), date: s.liro.date },
+      con: { name: s.con.name.trim(), status: s.con.status },
+      userAgent: navigator.userAgent
+    };
+  }
+
+  // One id per verification, kept (even across a crash) until the server
+  // accepts it — retries of the same submission can never make two rows.
+  function submissionId() {
+    var sid = null;
+    try { sid = localStorage.getItem(SID_KEY); } catch (e) {}
+    if (!sid) {
+      sid = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'sid-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      try { localStorage.setItem(SID_KEY, sid); } catch (e) {}
+    }
+    return sid;
+  }
+
+  var hintEl = document.querySelector('.export-hint');
+  var HINT_IDLE = hintEl.textContent;
+  var SUBMIT_TIMEOUT_MS = 90000;
+
+  function unansweredCount() {
+    var n = 0;
+    Object.keys(state.checks).forEach(function (g) {
+      state.checks[g].forEach(function (v) { if (!v) n++; });
+    });
+    state.params.forEach(function (p) { if (!p.result) n++; });
+    return n;
+  }
+
+  submitBtn.addEventListener('click', function () {
+    clearStatus();
+
+    // Validate: Material ID required
+    if (!state.header.materialId.trim()) {
+      var input = document.getElementById('hf-materialId');
+      input.classList.add('invalid');
+      showStatus('err', 'Material ID is required.');
+      input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      input.focus();
+      return;
+    }
+
+    // Warn once before recording an INCOMPLETE — a second tap still sends
+    // (sometimes half-answered is the truth), and answering items in
+    // between re-warns with the new count.
+    var missing = unansweredCount();
+    if (missing > 0 && missing !== incompleteWarned) {
+      incompleteWarned = missing;
+      showNeeds = true;
+      renderChecks();
+      renderParams();
+      showStatus('err', missing + (missing === 1 ? ' item is' : ' items are') +
+        ' unanswered (highlighted) — this will be recorded as INCOMPLETE. Tap Submit again to send anyway.');
+      return;
+    }
+
+    if (!CONFIG.SCRIPT_URL) {
+      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+    hintEl.textContent = 'Sending — this can take up to ~30 seconds with photos.';
+
+    var payload = buildPayload();
+    payload.submissionId = submissionId();
+
+    // Abort a hung request so the user isn't stuck staring at "Submitting…"
+    var ctrl = window.AbortController ? new AbortController() : null;
+    var abortTimer = ctrl ? setTimeout(function () { ctrl.abort(); }, SUBMIT_TIMEOUT_MS) : null;
+
+    // text/plain avoids the CORS preflight Apps Script can't answer
+    fetch(CONFIG.SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload),
+      signal: ctrl ? ctrl.signal : undefined
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status === 'ok') {
+          showSaved();
+        } else {
+          throw new Error(out.message || 'Server rejected the submission.');
+        }
+      })
+      .catch(function () {
+        // Never lose entered data — leave the form exactly as it is.
+        showStatus('err', "Couldn't save — check signal and tap Submit again.");
+      })
+      .then(function () {
+        clearTimeout(abortTimer);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Submit Verification';
+        hintEl.textContent = HINT_IDLE;
+      });
+  });
+
+  /* ============ Init ============ */
+  loadDraft();
+  applyDefaults();
+  renderHeader();
+  renderChecks();
+  renderParams();
+  renderPhotos();
+  renderCon();
+  document.getElementById('liro-name').value = state.liro.name;
+  document.getElementById('liro-date').value = state.liro.date;
+  document.getElementById('con-name').value = state.con.name;
+})();
+</script>
+</body>
+</html>
