@@ -223,7 +223,8 @@
     <div class="status" id="status-msg"></div>
     <div class="draft-row">
       <button class="sbtn" id="save-btn" type="button">Save draft</button>
-      <button class="sbtn" id="reset-btn" type="button">Reset form</button>
+      <button class="sbtn" id="load-btn" type="button">Load draft</button>
+      <button class="sbtn" id="reset-btn" type="button">Reset</button>
     </div>
     <button class="export-btn" id="submit-btn" type="button">Submit Verification</button>
     <div class="export-hint">Saves to the verification log — photos and a PDF record are filed automatically.</div>
@@ -376,13 +377,65 @@ var CONFIG = {
     }
   }
 
-  function applyDraftObject(d) {
-    Object.assign(state.header, d.header);
-    if (d.checks) state.checks = d.checks;
-    if (d.params && d.params.length) state.params = d.params;
-    if (d.photos) state.photos = d.photos;
-    Object.assign(state.liro, d.liro || {});
-    Object.assign(state.con, d.con || {});
+  var CHECK_GROUP_KEYS = ['Identity', 'Condition', 'Documents'];
+
+  /* A draft (local or cloud) can be several versions old, or — for the
+     cloud slot specifically — poisoned by a direct POST to the unauthenticated
+     saveDraft endpoint. Every field below is normalized to the shape the
+     renderers assume, so a short/missing/malformed value degrades to a
+     sane default instead of throwing mid-render and bricking the app. */
+  function normalizeChecks(c) {
+    var out = {};
+    CHECK_GROUP_KEYS.forEach(function (g) {
+      var arr = (c && Array.isArray(c[g])) ? c[g].slice(0, 3) : [];
+      while (arr.length < 3) arr.push(null);
+      out[g] = arr;
+    });
+    return out;
+  }
+
+  function normalizeParams(arr) {
+    if (!Array.isArray(arr) || !arr.length) return [{ name: '', observed: '', result: null }];
+    return arr.map(function (p) {
+      p = (p && typeof p === 'object') ? p : {};
+      var observed = p.observed == null ? '' : String(p.observed);
+      // Pre-dynamic-parameter drafts had a separate "other" explanation field.
+      if (!observed && p.result === 'Other' && p.other) observed = String(p.other);
+      return { name: p.name == null ? '' : String(p.name), observed: observed, result: p.result || null };
+    });
+  }
+
+  function normalizePhotos(ph) {
+    if (!Array.isArray(ph)) return [[], [], [], []];
+    var arr = ph.slice();
+    // Pre-packing-slip drafts had 3 sections (nameplate, sides, damage) —
+    // insert the packingSlip slot at its current index rather than losing
+    // or misfiling those photos under the wrong section.
+    if (arr.length === 3) arr.splice(2, 0, []);
+    while (arr.length < 4) arr.push([]);
+    arr = arr.slice(0, 4);
+    return arr.map(function (section) {
+      return Array.isArray(section)
+        ? section.filter(function (s) { return typeof s === 'string' && s.indexOf('data:') === 0; })
+        : [];
+    });
+  }
+
+  function applyDraftObject(d, opts) {
+    opts = opts || {};
+    if (d.header && typeof d.header === 'object') {
+      Object.keys(d.header).forEach(function (k) {
+        state.header[k] = d.header[k] == null ? '' : String(d.header[k]);
+      });
+    }
+    state.checks = normalizeChecks(d.checks);
+    state.params = normalizeParams(d.params);
+    // Cloud drafts never legitimately carry photos (cloudDraft() omits them)
+    // — a populated photos field there is either a stale client bug or an
+    // injected payload, so it's always ignored for that path.
+    if (!opts.skipPhotos) state.photos = normalizePhotos(d.photos);
+    if (d.liro && typeof d.liro === 'object') Object.assign(state.liro, d.liro);
+    if (d.con && typeof d.con === 'object') Object.assign(state.con, d.con);
   }
 
   function loadDraft() {
@@ -414,12 +467,17 @@ var CONFIG = {
   }
 
   /* True while nothing meaningful has been entered on THIS device (smart
-     defaults like project/phase/dates don't count) — the only state the
-     cloud draft is allowed to overwrite. */
+     defaults like project/phase/dates don't count — see defaultedFields
+     below) — the only state the cloud draft is allowed to overwrite. */
   function isPristine() {
     var h = state.header;
     if (h.materialId || h.submittal || h.model || h.location) return false;
     if (h.recordId && h.recordId !== 'V-') return false;
+    if (h.project && !defaultedFields.project) return false;
+    if (h.phase && !defaultedFields.phase) return false;
+    if (h.date && !defaultedFields.date) return false;
+    if (state.liro.name && !defaultedFields.liroName) return false;
+    if (state.liro.date && !defaultedFields.liroDate) return false;
     var touched = false;
     Object.keys(state.checks).forEach(function (g) {
       state.checks[g].forEach(function (v) { if (v) touched = true; });
@@ -433,21 +491,72 @@ var CONFIG = {
     return true;
   }
 
-  function maybeLoadCloudDraft(hadLocalDraft) {
-    if (hadLocalDraft || !CONFIG.SCRIPT_URL) return;
+  var lastCloudCheck = 0;
+  var pendingCloud = null;   // fetched draft awaiting the Load-button confirm
+
+  function fmtSavedAt(iso) {
+    if (!iso) return '';
+    try {
+      var d = new Date(iso);
+      return ' (saved ' + d.toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) + ')';
+    } catch (e) { return ''; }
+  }
+
+  function applyCloudDraft(draft, savedAt) {
+    applyDraftObject(draft, { skipPhotos: true });
+    // Wholesale content replacement — any earlier "N items unanswered"
+    // warning belonged to the form that's gone now.
+    showNeeds = false;
+    incompleteWarned = 0;
+    defaultedFields = {};
+    applyDefaults();
+    renderAll();
+    setSignoffInputs();
+    schedulePersist();   // it's now this device's local draft too
+    showStatus('ok', 'Loaded the saved draft' + fmtSavedAt(savedAt) + '.');
+  }
+
+  /* auto=true runs quietly (page load, or returning to the app): it applies
+     the cloud draft only over an untouched form, and otherwise just hints
+     that one exists. The Load button calls with auto=false: an explicit
+     pull, with a confirm step when the screen already has content. */
+  function checkCloudDraft(auto) {
+    if (!CONFIG.SCRIPT_URL) return;
+    if (auto) {
+      var now = Date.now();
+      if (now - lastCloudCheck < 15000) return;
+      lastCloudCheck = now;
+    }
     fetch(CONFIG.SCRIPT_URL + '?draft=1')
       .then(function (res) { return res.json(); })
       .then(function (out) {
-        if (out.status === 'ok' && out.draft && out.draft.header && isPristine()) {
-          applyDraftObject(out.draft);
-          applyDefaults();
-          renderAll();
-          setSignoffInputs();
-          schedulePersist();   // it's now this device's local draft too
-          showStatus('ok', 'Loaded the saved draft.');
+        if (out.status !== 'ok') throw new Error();
+        var draft = out.draft;
+        if (!draft || !draft.header) {
+          if (!auto) showStatus('err', 'No saved draft found.');
+          return;
+        }
+        if (isPristine()) {
+          applyCloudDraft(draft, out.savedAt);
+        } else if (!auto) {
+          pendingCloud = { draft: draft, savedAt: out.savedAt };
+          loadBtn.classList.add('armed');
+          showStatus('err', 'This replaces what is on this screen with the saved draft' +
+            fmtSavedAt(out.savedAt) + '. Tap Load again to confirm.');
+          clearTimeout(loadArmTimer);
+          loadArmTimer = setTimeout(function () {
+            loadBtn.classList.remove('armed');
+            pendingCloud = null;
+            clearStatus();
+          }, 8000);
+        } else if (JSON.stringify(cloudDraft()) !== JSON.stringify(draft)) {
+          showStatus('ok', 'A saved draft' + fmtSavedAt(out.savedAt) +
+            ' is available — tap "Load draft" to use it.');
         }
       })
-      .catch(function () { /* offline — the local draft story still works */ });
+      .catch(function () {
+        if (!auto) showStatus('err', "Couldn't reach the cloud — check signal and try again.");
+      });
   }
 
   /* ============ Smart defaults ============
@@ -463,14 +572,20 @@ var CONFIG = {
       ('0' + d.getDate()).slice(-2);
   }
 
+  // Which of the 5 default-fillable fields currently hold a DEFAULT value
+  // rather than something the user (or a loaded draft) actually entered.
+  // isPristine() treats a defaulted field as blank; the field's own input
+  // listener clears its flag the moment the user types in it.
+  var defaultedFields = {};
+
   function applyDefaults() {
     var def = {};
     try { def = JSON.parse(localStorage.getItem(DEFAULTS_KEY)) || {}; } catch (e) {}
-    if (!state.header.project && def.project) state.header.project = def.project;
-    if (!state.header.phase && def.phase) state.header.phase = def.phase;
-    if (!state.liro.name && def.liroName) state.liro.name = def.liroName;
-    if (!state.header.date) state.header.date = todayStr();
-    if (!state.liro.date) state.liro.date = todayStr();
+    if (!state.header.project && def.project) { state.header.project = def.project; defaultedFields.project = true; }
+    if (!state.header.phase && def.phase) { state.header.phase = def.phase; defaultedFields.phase = true; }
+    if (!state.liro.name && def.liroName) { state.liro.name = def.liroName; defaultedFields.liroName = true; }
+    if (!state.header.date) { state.header.date = todayStr(); defaultedFields.date = true; }
+    if (!state.liro.date) { state.liro.date = todayStr(); defaultedFields.liroDate = true; }
   }
 
   function saveDefaults() {
@@ -501,6 +616,7 @@ var CONFIG = {
         input.addEventListener('input', function () {
           state.header[key] = input.value;
           input.classList.remove('invalid');
+          delete defaultedFields[key];   // project/date: user typed over the default
           schedulePersist();
         });
         lab.appendChild(input);
@@ -557,10 +673,12 @@ var CONFIG = {
         custom.style.display = 'none';
         state.header.phase = sel.value;
       }
+      delete defaultedFields.phase;
       schedulePersist();
     });
     custom.addEventListener('input', function () {
       state.header.phase = custom.value;
+      delete defaultedFields.phase;
       schedulePersist();
     });
 
@@ -630,7 +748,7 @@ var CONFIG = {
         obs.type = 'text';
         obs.className = 'observed';
         obs.placeholder = 'Observed value / explanation';
-        obs.value = p.observed;
+        obs.value = p.observed || '';
         obs.addEventListener('input', function () { p.observed = obs.value; schedulePersist(); });
         box.appendChild(obs);
       }
@@ -700,16 +818,32 @@ var CONFIG = {
       file.style.display = 'none';
       file.addEventListener('change', function () {
         var files = Array.prototype.slice.call(file.files || []);
-        files.forEach(function (f) {
-          compressImage(f, photoCompress[i].edge, photoCompress[i].q, function (dataUrl) {
-            state.photos[i].push(dataUrl);
-            renderPhotos();
-            schedulePersist();
-          }, function () {
-            showStatus('err', "Couldn't read one of the photos — try again.");
-          });
-        });
         file.value = '';
+        // Pin the array reference this batch belongs to. If Reset/Submit
+        // replaces state.photos while a compression is still in flight, this
+        // batch keeps writing to the OLD (now-detached) array instead of
+        // silently attaching a late photo to whatever the next form becomes.
+        // Compressing one file at a time (not all at once) also bounds peak
+        // memory — decoding several full camera photos simultaneously is a
+        // real crash risk on older phones.
+        var target = state.photos[i];
+        var idx = 0;
+        function next() {
+          if (idx >= files.length) return;
+          var f = files[idx++];
+          compressImage(f, photoCompress[i].edge, photoCompress[i].q, function (dataUrl) {
+            if (state.photos[i] === target) {
+              target.push(dataUrl);
+              renderPhotos();
+              schedulePersist();
+            }
+            next();
+          }, function () {
+            if (state.photos[i] === target) showStatus('err', "Couldn't read one of the photos — try again.");
+            next();
+          });
+        }
+        next();
       });
       row.appendChild(file);
 
@@ -730,8 +864,8 @@ var CONFIG = {
     });
   }
 
-  document.getElementById('liro-name').addEventListener('input', function (e) { state.liro.name = e.target.value; schedulePersist(); });
-  document.getElementById('liro-date').addEventListener('input', function (e) { state.liro.date = e.target.value; schedulePersist(); });
+  document.getElementById('liro-name').addEventListener('input', function (e) { state.liro.name = e.target.value; delete defaultedFields.liroName; schedulePersist(); });
+  document.getElementById('liro-date').addEventListener('input', function (e) { state.liro.date = e.target.value; delete defaultedFields.liroDate; schedulePersist(); });
   document.getElementById('con-name').addEventListener('input', function (e) { state.con.name = e.target.value; schedulePersist(); });
 
   function renderAll() {
@@ -746,7 +880,14 @@ var CONFIG = {
   /* ============ CSV export ============ */
   function exportCsv() {
     var s = state;
-    var q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+    // Quoting alone does NOT stop Excel/Sheets from evaluating a cell that
+    // starts with =, +, -, or @ as a formula on open — neutralize with a
+    // leading apostrophe before quoting.
+    var q = function (v) {
+      var str = String(v == null ? '' : v);
+      if (/^[=+\-@\t\r]/.test(str)) str = "'" + str;
+      return '"' + str.replace(/"/g, '""') + '"';
+    };
     var rows = [['Section','Item','Result','Value / Notes']];
     var h = s.header;
     rows.push(['Header','Project','',h.project],['Header','Phase # - Trade / FMS No.','',h.phase],
@@ -775,7 +916,11 @@ var CONFIG = {
     a.href = URL.createObjectURL(blob);
     var id = (s.header.materialId || 'record').replace(/[^\w-]+/g, '_');
     a.download = 'Delivery_Verification_' + id + (s.header.date ? '_' + s.header.date : '') + '.csv';
+    // Some mobile browsers (Firefox for Android) silently no-op a click on
+    // an anchor that isn't in the document.
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
   }
   document.getElementById('export-btn').addEventListener('click', exportCsv);
@@ -813,6 +958,7 @@ var CONFIG = {
     state.con = { name:'', status:null };
     showNeeds = false;
     incompleteWarned = 0;
+    defaultedFields = {};
     applyDefaults();
     renderAll();
     setSignoffInputs();
@@ -822,26 +968,31 @@ var CONFIG = {
 
   function buildPayload() {
     var s = state;
+    // Defensive coercion: a draft from a different app version (or a
+    // malformed one that slipped past normalization) must never throw here
+    // — a throw after the Submit button is already disabled leaves it stuck
+    // on "Submitting…" with no recovery but a reload.
+    var str = function (v) { return String(v == null ? '' : v).trim(); };
     // strip the data-URL prefix; the server decodes plain base64
-    var b64 = function (arr) { return arr.map(function (d) { return d.split(',')[1]; }); };
+    var b64 = function (arr) { return (arr || []).map(function (d) { return String(d).split(',')[1]; }); };
     return {
       header: {
-        project: s.header.project.trim(),
-        phase: s.header.phase.trim(),
-        materialId: s.header.materialId.trim(),
-        recordId: s.header.recordId.trim(),
-        submittal: s.header.submittal.trim(),
-        model: s.header.model.trim(),
-        date: s.header.date,
-        location: s.header.location.trim()
+        project: str(s.header.project),
+        phase: str(s.header.phase),
+        materialId: str(s.header.materialId),
+        recordId: str(s.header.recordId),
+        submittal: str(s.header.submittal),
+        model: str(s.header.model),
+        date: s.header.date || '',
+        location: str(s.header.location)
       },
       checks: s.checks,
       params: s.params.map(function (p) {
         // observed only travels with Other — the tap-only results send no text
         return {
-          name: (p.name || '').trim(),
-          observed: p.result === 'Other' ? p.observed.trim() : '',
-          result: p.result
+          name: str(p.name),
+          observed: p.result === 'Other' ? str(p.observed) : '',
+          result: p.result || null
         };
       }),
       photos: { nameplate: b64(s.photos[0]), sides: b64(s.photos[1]), packingSlip: b64(s.photos[2]), damage: b64(s.photos[3]) },
@@ -850,8 +1001,8 @@ var CONFIG = {
       // requires touching or redeploying the script. (Parameter names are
       // per-record data now, typed in the form itself.)
       labels: { checks: groupDefs, photos: photoLabels },
-      liro: { name: s.liro.name.trim(), date: s.liro.date },
-      con: { name: s.con.name.trim(), status: s.con.status },
+      liro: { name: str(s.liro.name), date: s.liro.date || '' },
+      con: { name: str(s.con.name), status: s.con.status || null },
       userAgent: navigator.userAgent
     };
   }
@@ -919,38 +1070,51 @@ var CONFIG = {
     submitBtn.textContent = 'Submitting…';
     hintEl.textContent = 'Sending — this can take up to ~30 seconds with photos.';
 
-    var payload = buildPayload();
-    payload.submissionId = submissionId();
+    // Everything from here until the fetch actually kicks off runs
+    // synchronously (buildPayload, submissionId) — if any of it throws
+    // (a foreign-shaped draft that slipped past normalization, corrupt
+    // localStorage, anything), this catch guarantees the button un-sticks
+    // instead of reading "Submitting…" forever with no way to retry short
+    // of a reload.
+    try {
+      var payload = buildPayload();
+      payload.submissionId = submissionId();
 
-    // Abort a hung request so the user isn't stuck staring at "Submitting…"
-    var ctrl = window.AbortController ? new AbortController() : null;
-    var abortTimer = ctrl ? setTimeout(function () { ctrl.abort(); }, SUBMIT_TIMEOUT_MS) : null;
+      // Abort a hung request so the user isn't stuck staring at "Submitting…"
+      var ctrl = window.AbortController ? new AbortController() : null;
+      var abortTimer = ctrl ? setTimeout(function () { ctrl.abort(); }, SUBMIT_TIMEOUT_MS) : null;
 
-    // text/plain avoids the CORS preflight Apps Script can't answer
-    fetch(CONFIG.SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload),
-      signal: ctrl ? ctrl.signal : undefined
-    })
-      .then(function (res) { return res.json(); })
-      .then(function (out) {
-        if (out.status === 'ok') {
-          showSaved();
-        } else {
-          throw new Error(out.message || 'Server rejected the submission.');
-        }
+      // text/plain avoids the CORS preflight Apps Script can't answer
+      fetch(CONFIG.SCRIPT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload),
+        signal: ctrl ? ctrl.signal : undefined
       })
-      .catch(function () {
-        // Never lose entered data — leave the form exactly as it is.
-        showStatus('err', "Couldn't save — check signal and tap Submit again.");
-      })
-      .then(function () {
-        clearTimeout(abortTimer);
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Submit Verification';
-        hintEl.textContent = HINT_IDLE;
-      });
+        .then(function (res) { return res.json(); })
+        .then(function (out) {
+          if (out.status === 'ok') {
+            showSaved();
+          } else {
+            throw new Error(out.message || 'Server rejected the submission.');
+          }
+        })
+        .catch(function () {
+          // Never lose entered data — leave the form exactly as it is.
+          showStatus('err', "Couldn't save — check signal and tap Submit again.");
+        })
+        .then(function () {
+          clearTimeout(abortTimer);
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Submit Verification';
+          hintEl.textContent = HINT_IDLE;
+        });
+    } catch (err) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit Verification';
+      hintEl.textContent = HINT_IDLE;
+      showStatus('err', "Couldn't save — check signal and tap Submit again.");
+    }
   });
 
   /* ============ Save draft (cross-device) ============ */
@@ -988,6 +1152,23 @@ var CONFIG = {
       });
   });
 
+  /* ============ Load draft (explicit cloud pull) ============ */
+  var loadBtn = document.getElementById('load-btn');
+  var loadArmTimer = null;
+
+  loadBtn.addEventListener('click', function () {
+    if (loadBtn.classList.contains('armed') && pendingCloud) {
+      clearTimeout(loadArmTimer);
+      loadBtn.classList.remove('armed');
+      var pc = pendingCloud;
+      pendingCloud = null;
+      applyCloudDraft(pc.draft, pc.savedAt);
+      return;
+    }
+    clearStatus();
+    checkCloudDraft(false);
+  });
+
   /* ============ Reset form (two-tap confirm) ============ */
   var resetBtn = document.getElementById('reset-btn');
   var resetArmTimer = null;
@@ -1010,11 +1191,22 @@ var CONFIG = {
   });
 
   /* ============ Init ============ */
-  var hadLocalDraft = loadDraft();
+  loadDraft();
   applyDefaults();
   renderAll();
   setSignoffInputs();
-  maybeLoadCloudDraft(hadLocalDraft);
+  checkCloudDraft(true);
+
+  // Returning to the app (home-screen resume, tab switch) re-checks quietly,
+  // so a draft saved at the desk shows up without a manual refresh.
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') checkCloudDraft(true);
+  });
+  // Some browsers restore the page from bfcache (e.g. swiping back) without
+  // firing visibilitychange — pageshow with persisted:true catches that.
+  window.addEventListener('pageshow', function (ev) {
+    if (ev.persisted) checkCloudDraft(true);
+  });
 })();
 </script>
 </body>
