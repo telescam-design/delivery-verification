@@ -50,7 +50,7 @@
   body{margin:0;background:var(--gray-50);font-family:var(--font-body);color:var(--text-body)}
   a{color:var(--text-link)}a:hover{color:var(--text-link-hover)}
   input::placeholder,textarea::placeholder{color:var(--gray-400)}
-  input,textarea,button{font-family:inherit}
+  input,select,textarea,button{font-family:inherit}
 
   .wrap{max-width:780px;margin:0 auto;padding:24px 16px 64px}
 
@@ -73,6 +73,8 @@
   .field{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:600;color:var(--gray-600)}
   .field input{border:1px solid var(--gray-300);border-radius:5px;padding:9px 10px;font-size:14px;color:var(--gray-900);background:#fff;outline:none}
   .field input:focus{border-color:var(--liro-blue);box-shadow:0 0 0 3px var(--focus-ring)}
+  .field select{border:1px solid var(--gray-300);border-radius:5px;padding:9px 10px;min-height:40px;font-size:14px;color:var(--gray-900);background:#fff;outline:none}
+  .field select:focus{border-color:var(--liro-blue);box-shadow:0 0 0 3px var(--focus-ring)}
 
   /* ---- Check groups ---- */
   .group{margin-top:16px}
@@ -94,6 +96,13 @@
   .param-label{font-size:14px;font-weight:600;color:var(--gray-900)}
   .param input.observed{border:1px solid var(--gray-300);border-radius:5px;padding:9px 10px;font-size:14px;font-family:var(--font-mono);color:var(--gray-900);outline:none;max-width:340px}
   .param input.observed:focus{border-color:var(--liro-blue);box-shadow:0 0 0 3px var(--focus-ring)}
+  .param-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .param-head .pname{flex:1 1 220px;max-width:420px;border:1px solid var(--gray-300);border-radius:5px;padding:9px 10px;font-size:14px;color:var(--gray-900);background:#fff;outline:none}
+  .param-head .pname:focus{border-color:var(--liro-blue);box-shadow:0 0 0 3px var(--focus-ring)}
+  .param-ctrl{display:flex;gap:8px;padding:14px 0 4px}
+  .pbtn{min-height:44px;padding:9px 16px;border-radius:5px;border:1.5px dashed var(--gray-400);background:var(--gray-50);color:var(--liro-blue);font-size:13px;font-weight:600;cursor:pointer}
+  .pbtn:hover{border-color:var(--liro-blue);background:var(--info-bg)}
+  .pbtn:disabled{opacity:.4;cursor:not-allowed}
 
   /* ---- Photos ---- */
   .photo-item{padding:14px 0;border-bottom:1px solid var(--gray-100)}
@@ -155,7 +164,7 @@
         <rect x="142.05" y="11.65" width="3.83" height="19.6"></rect>
       </svg>
       <div class="banner-title">Material Delivery Verification Checklist</div>
-      <div class="banner-sub">AHU / Mechanical Equipment</div>
+      <div class="banner-sub">General Material / Equipment</div>
     </div>
   </div>
 
@@ -172,7 +181,7 @@
 
   <div class="card">
     <div class="card-title">Parameter Verification</div>
-    <div class="card-hint">Check one for each — write the observed value only when Other.</div>
+    <div class="card-hint">Name each parameter being verified, then check one — write the observed value only when Other. Use + to add more parameters.</div>
     <div id="params"></div>
   </div>
 
@@ -239,7 +248,7 @@ var CONFIG = {
   var state = {
     header: { project:'', phase:'', materialId:'', recordId:'V-', submittal:'', model:'', date:'', location:'' },
     checks: { Identity:[null,null,null], Condition:[null,null,null], Documents:[null,null,null] },
-    params: [ {observed:'',result:null}, {observed:'',result:null}, {observed:'',result:null} ],
+    params: [ {name:'', observed:'', result:null} ],
     photos: [[],[],[],[]],
     liro: { name:'', date:'' },
     con: { name:'', status:null }
@@ -247,11 +256,20 @@ var CONFIG = {
 
   /* ============ Definitions ============ */
   var headerDefs = [
-    ['project','Project','text',''], ['phase','Phase # – Trade / FMS No.','text',''],
+    ['project','Project','text',''], ['phase','Phase # – Trade / FMS No.','select',''],
     ['materialId','Material ID','text',''], ['recordId','Verification Record ID','text','V-'],
     ['submittal','Submittal No.','text',''], ['model','Approved Model No.','text',''],
     ['date','Delivery date','date',''], ['location','Install location','text','']
   ];
+
+  var PHASE_OPTIONS = [
+    'Phase 4 - Core & Shell',
+    'Phase 4 - Plumbing&FP',
+    'Phase 4 - Electrical',
+    'Phase 4 - HVAC',
+    'Phase 4 - Interior Fitout'
+  ];
+  var PHASE_CUSTOM = '__custom__';
 
   var groupDefs = {
     Identity: ['Nameplate manufacturer, model and serial match the approved submittal',
@@ -273,7 +291,6 @@ var CONFIG = {
   // unanswered rows until they're answered or the form is submitted anyway.
   var showNeeds = false;
   var incompleteWarned = 0;
-  var paramLabels = ['Example parameter 1','Example parameter 2','Example parameter 3'];
   var photoLabels = ['Nameplate photographed','All sides / connections photographed','Packing slip / bill of lading / delivery ticket photographed','Any damage or discrepancy photographed'];
 
   /* ============ Helpers ============ */
@@ -355,7 +372,7 @@ var CONFIG = {
       if (!d || !d.header) return;
       Object.assign(state.header, d.header);
       if (d.checks) state.checks = d.checks;
-      if (d.params) state.params = d.params;
+      if (d.params && d.params.length) state.params = d.params;
       if (d.photos) state.photos = d.photos;
       Object.assign(state.liro, d.liro || {});
       Object.assign(state.con, d.con || {});
@@ -409,19 +426,85 @@ var CONFIG = {
     headerDefs.forEach(function (d) {
       var key = d[0], label = d[1], type = d[2], ph = d[3];
       var lab = el('label', 'field', label);
-      var input = document.createElement('input');
-      input.id = 'hf-' + key;
-      input.type = type;
-      input.value = state.header[key];
-      if (ph) input.placeholder = ph;
-      input.addEventListener('input', function () {
-        state.header[key] = input.value;
-        input.classList.remove('invalid');
-        schedulePersist();
-      });
-      lab.appendChild(input);
+      if (type === 'select') {
+        lab.appendChild(buildPhaseSelect());
+      } else {
+        var input = document.createElement('input');
+        input.id = 'hf-' + key;
+        input.type = type;
+        input.value = state.header[key];
+        if (ph) input.placeholder = ph;
+        input.addEventListener('input', function () {
+          state.header[key] = input.value;
+          input.classList.remove('invalid');
+          schedulePersist();
+        });
+        lab.appendChild(input);
+      }
       grid.appendChild(lab);
     });
+  }
+
+  /* Phase is a dropdown of the Phase 4 prime contracts; "Custom…" reveals a
+     free-text input for anything else. state.header.phase always holds the
+     final string either way. */
+  function buildPhaseSelect() {
+    var wrap = el('span');
+    var sel = document.createElement('select');
+    sel.id = 'hf-phase';
+    var first = document.createElement('option');
+    first.value = '';
+    first.textContent = 'Select phase…';
+    sel.appendChild(first);
+    PHASE_OPTIONS.forEach(function (o) {
+      var op = document.createElement('option');
+      op.value = o;
+      op.textContent = o;
+      sel.appendChild(op);
+    });
+    var cu = document.createElement('option');
+    cu.value = PHASE_CUSTOM;
+    cu.textContent = 'Custom…';
+    sel.appendChild(cu);
+
+    var custom = document.createElement('input');
+    custom.type = 'text';
+    custom.id = 'hf-phase-custom';
+    custom.placeholder = 'Type the phase / trade';
+    custom.autocomplete = 'off';
+    custom.style.display = 'none';
+    custom.style.marginTop = '6px';
+
+    // Restore: a known option selects itself; any other saved text = Custom
+    if (state.header.phase && PHASE_OPTIONS.indexOf(state.header.phase) !== -1) {
+      sel.value = state.header.phase;
+    } else if (state.header.phase) {
+      sel.value = PHASE_CUSTOM;
+      custom.value = state.header.phase;
+      custom.style.display = '';
+    }
+
+    sel.addEventListener('change', function () {
+      if (sel.value === PHASE_CUSTOM) {
+        custom.style.display = '';
+        state.header.phase = custom.value;
+        custom.focus();
+      } else {
+        custom.style.display = 'none';
+        state.header.phase = sel.value;
+      }
+      schedulePersist();
+    });
+    custom.addEventListener('input', function () {
+      state.header.phase = custom.value;
+      schedulePersist();
+    });
+
+    wrap.appendChild(sel);
+    wrap.appendChild(custom);
+    wrap.style.display = 'flex';
+    wrap.style.flexDirection = 'column';
+    return wrap;
   }
 
   /* ============ Check groups ============ */
@@ -448,13 +531,24 @@ var CONFIG = {
     });
   }
 
-  /* ============ Parameters ============ */
+  /* ============ Parameters (dynamic — one checklist fits any material) ==== */
   function renderParams() {
     var host = document.getElementById('params');
     host.innerHTML = '';
     state.params.forEach(function (p, i) {
       var box = el('div', 'param' + (showNeeds && !p.result ? ' needs-answer' : ''));
-      box.appendChild(el('div', 'param-label', paramLabels[i]));
+
+      var head = el('div', 'param-head');
+      head.appendChild(el('div', 'param-label', 'Parameter ' + (i + 1)));
+      var name = document.createElement('input');
+      name.type = 'text';
+      name.className = 'pname';
+      name.placeholder = 'What is being verified? (e.g. voltage, size, capacity)';
+      name.autocomplete = 'off';
+      name.value = p.name || '';
+      name.addEventListener('input', function () { p.name = name.value; schedulePersist(); });
+      head.appendChild(name);
+      box.appendChild(head);
 
       var opts = el('div', 'opts wrap-opts');
       ['Match',"Doesn't Match",'N/A','Other'].forEach(function (r) {
@@ -478,6 +572,28 @@ var CONFIG = {
       }
       host.appendChild(box);
     });
+
+    var ctrl = el('div', 'param-ctrl');
+    var plus = el('button', 'pbtn', '+ Add parameter');
+    plus.type = 'button';
+    plus.addEventListener('click', function () {
+      state.params.push({ name:'', observed:'', result:null });
+      renderParams();
+      schedulePersist();
+    });
+    var minus = el('button', 'pbtn', '− Remove last');
+    minus.type = 'button';
+    minus.disabled = state.params.length <= 1;
+    minus.addEventListener('click', function () {
+      if (state.params.length > 1) {
+        state.params.pop();
+        renderParams();
+        schedulePersist();
+      }
+    });
+    ctrl.appendChild(plus);
+    ctrl.appendChild(minus);
+    host.appendChild(ctrl);
   }
 
   /* ============ Photos ============ */
@@ -570,7 +686,7 @@ var CONFIG = {
       });
     });
     s.params.forEach(function (p, i) {
-      rows.push(['Parameters', paramLabels[i],
+      rows.push(['Parameters', (p.name && p.name.trim()) || ('Parameter ' + (i + 1)),
         p.result || '', p.result === 'Other' ? p.observed : '']);
     });
     photoLabels.forEach(function (label, i) {
@@ -618,7 +734,7 @@ var CONFIG = {
   function resetForm() {
     state.header = { project:'', phase:'', materialId:'', recordId:'V-', submittal:'', model:'', date:'', location:'' };
     state.checks = { Identity:[null,null,null], Condition:[null,null,null], Documents:[null,null,null] };
-    state.params = [ {observed:'',result:null}, {observed:'',result:null}, {observed:'',result:null} ];
+    state.params = [ {name:'', observed:'', result:null} ];
     state.photos = [[],[],[],[]];
     state.liro = { name:'', date:'' };
     state.con = { name:'', status:null };
@@ -651,13 +767,18 @@ var CONFIG = {
       checks: s.checks,
       params: s.params.map(function (p) {
         // observed only travels with Other — the tap-only results send no text
-        return { observed: p.result === 'Other' ? p.observed.trim() : '', result: p.result };
+        return {
+          name: (p.name || '').trim(),
+          observed: p.result === 'Other' ? p.observed.trim() : '',
+          result: p.result
+        };
       }),
       photos: { nameplate: b64(s.photos[0]), sides: b64(s.photos[1]), packingSlip: b64(s.photos[2]), damage: b64(s.photos[3]) },
       // The app is the single source of truth for wording — the server uses
-      // these for the PDF and processing, so renaming an item or parameter
-      // here never requires touching or redeploying the script.
-      labels: { checks: groupDefs, params: paramLabels, photos: photoLabels },
+      // these for the PDF and processing, so renaming an item here never
+      // requires touching or redeploying the script. (Parameter names are
+      // per-record data now, typed in the form itself.)
+      labels: { checks: groupDefs, photos: photoLabels },
       liro: { name: s.liro.name.trim(), date: s.liro.date },
       con: { name: s.con.name.trim(), status: s.con.status },
       userAgent: navigator.userAgent
