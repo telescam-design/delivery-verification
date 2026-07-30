@@ -302,6 +302,8 @@ var CONFIG = {
   // unanswered rows until they're answered or the form is submitted anyway.
   var showNeeds = false;
   var incompleteWarned = 0;
+  var lastParamAddTime = 0;
+  var lastParamRemoveTime = 0;
   var photoLabels = ['Nameplate photographed','All sides / connections photographed','Packing slip / bill of lading / delivery ticket photographed','Any damage or discrepancy photographed'];
 
   /* ============ Helpers ============ */
@@ -394,15 +396,41 @@ var CONFIG = {
     return out;
   }
 
+  /* Collapse an exact duplicate of a fully-answered parameter (same name +
+     result + observed value) — the likely real-world cause is a double-tap
+     on "+ Add parameter" (touchscreen, gloves) immediately re-filled with
+     the same value while transcribing a spec sheet, which then rides along
+     through Save/Load to the other device. A blank or not-yet-answered row
+     (no name, or no result picked yet) is never treated as a duplicate of
+     anything — this only ever removes rows that are truly identical AND
+     complete. */
+  function dedupeParams(list) {
+    var out = [];
+    var seen = {};
+    list.forEach(function (p) {
+      var name = p.name || '';
+      var result = p.result || null;
+      if (name && result) {
+        var sig = name + '' + result + '' + (p.observed || '');
+        if (seen[sig]) return;
+        seen[sig] = true;
+      }
+      out.push(p);
+    });
+    return out;
+  }
+
   function normalizeParams(arr) {
     if (!Array.isArray(arr) || !arr.length) return [{ name: '', observed: '', result: null }];
-    return arr.map(function (p) {
+    var mapped = arr.map(function (p) {
       p = (p && typeof p === 'object') ? p : {};
       var observed = p.observed == null ? '' : String(p.observed);
       // Pre-dynamic-parameter drafts had a separate "other" explanation field.
       if (!observed && p.result === 'Other' && p.other) observed = String(p.other);
       return { name: p.name == null ? '' : String(p.name), observed: observed, result: p.result || null };
     });
+    var deduped = dedupeParams(mapped);
+    return deduped.length ? deduped : [{ name: '', observed: '', result: null }];
   }
 
   function normalizePhotos(ph) {
@@ -759,6 +787,14 @@ var CONFIG = {
     var plus = el('button', 'pbtn', '+ Add parameter');
     plus.type = 'button';
     plus.addEventListener('click', function () {
+      // Guards against a double-tap (touchscreen, gloves) registering as
+      // two adds before the first render settles — that silently created a
+      // second blank row the user would then fill in identically to the
+      // one next to it, which is the most likely real cause of the
+      // "duplicate parameter" reports.
+      var now = Date.now();
+      if (now - lastParamAddTime < 500) return;
+      lastParamAddTime = now;
       state.params.push({ name:'', observed:'', result:null });
       renderParams();
       schedulePersist();
@@ -767,6 +803,9 @@ var CONFIG = {
     minus.type = 'button';
     minus.disabled = state.params.length <= 1;
     minus.addEventListener('click', function () {
+      var now = Date.now();
+      if (now - lastParamRemoveTime < 500) return;
+      lastParamRemoveTime = now;
       if (state.params.length > 1) {
         state.params.pop();
         renderParams();
@@ -899,7 +938,9 @@ var CONFIG = {
         rows.push([g, label, s.checks[g][i] || '', '']);
       });
     });
-    s.params.forEach(function (p, i) {
+    // Defensive: guarantee the exported record is never duplicated even if
+    // the live in-memory list somehow already has an exact-duplicate row.
+    dedupeParams(s.params).forEach(function (p, i) {
       rows.push(['Parameters', (p.name && p.name.trim()) || ('Parameter ' + (i + 1)),
         p.result || '', p.result === 'Other' ? p.observed : '']);
     });
@@ -987,7 +1028,10 @@ var CONFIG = {
         location: str(s.header.location)
       },
       checks: s.checks,
-      params: s.params.map(function (p) {
+      // Defensive: guarantee the submitted record is never duplicated even
+      // if the live in-memory list somehow already has an exact-duplicate
+      // row (e.g. a double-tap on "+ Add parameter" before this fix landed).
+      params: dedupeParams(s.params).map(function (p) {
         // observed only travels with Other — the tap-only results send no text
         return {
           name: str(p.name),
