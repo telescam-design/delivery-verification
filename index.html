@@ -99,6 +99,10 @@
   .param-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .param-head .pname{flex:1 1 220px;max-width:420px;border:1px solid var(--gray-300);border-radius:5px;padding:9px 10px;font-size:14px;color:var(--gray-900);background:#fff;outline:none}
   .param-head .pname:focus{border-color:var(--liro-blue);box-shadow:0 0 0 3px var(--focus-ring)}
+  .param-rm{flex:0 0 auto;width:44px;height:44px;border-radius:50%;border:1px solid var(--gray-300);background:#fff;color:var(--gray-500);font-size:20px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+  .param-rm:hover{border-color:var(--error);color:var(--error);background:var(--error-bg)}
+  .param-rm:active{transform:translateY(1px)}
+  .param-rm:disabled{opacity:.35;cursor:not-allowed}
   .param-ctrl{display:flex;gap:8px;padding:14px 0 4px}
   .pbtn{min-height:44px;padding:9px 16px;border-radius:5px;border:1.5px dashed var(--gray-400);background:var(--gray-50);color:var(--liro-blue);font-size:13px;font-weight:600;cursor:pointer}
   .pbtn:hover{border-color:var(--liro-blue);background:var(--info-bg)}
@@ -132,6 +136,14 @@
   .sbtn:hover{border-color:var(--liro-blue);color:var(--liro-blue)}
   .sbtn:disabled{opacity:.5;cursor:not-allowed}
   .sbtn.armed{border-color:var(--error);color:var(--error);background:var(--error-bg)}
+  .draft-picker{width:100%;max-width:420px;border:1px solid var(--gray-300);border-radius:5px;background:#fff;overflow:hidden}
+  .draft-picker-item{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;text-align:left;padding:10px 14px;border:none;border-bottom:1px solid var(--gray-100);background:#fff;cursor:pointer;min-height:44px;justify-content:center}
+  .draft-picker-item:last-of-type{border-bottom:none}
+  .draft-picker-item:hover{background:var(--info-bg)}
+  .draft-picker-item .dp-title{font-size:13.5px;font-weight:600;color:var(--gray-900)}
+  .draft-picker-item .dp-sub{font-size:11.5px;color:var(--gray-500)}
+  .draft-picker-cancel{width:100%;min-height:40px;padding:8px;border:none;background:var(--gray-50);color:var(--gray-600);font-size:12.5px;font-weight:600;cursor:pointer;border-top:1px solid var(--gray-200)}
+  .draft-picker-cancel:hover{background:var(--gray-100)}
 
   /* ---- Status + toast ---- */
   .status{display:none;font-size:14px;font-weight:600;line-height:1.4;padding:10px 14px;border-radius:5px;max-width:420px}
@@ -187,7 +199,7 @@
 
   <div class="card">
     <div class="card-title">Parameter Verification</div>
-    <div class="card-hint">Name each parameter being verified, then check one — write the observed value only when Other. Use + to add more parameters.</div>
+    <div class="card-hint">Name each parameter being verified, then check one — write the observed value only when Other. Use + to add a parameter, × to remove one.</div>
     <div id="params"></div>
   </div>
 
@@ -226,6 +238,7 @@
       <button class="sbtn" id="load-btn" type="button">Load draft</button>
       <button class="sbtn" id="reset-btn" type="button">Reset</button>
     </div>
+    <div class="draft-picker" id="draft-picker" style="display:none"></div>
     <button class="export-btn" id="submit-btn" type="button">Submit Verification</button>
     <div class="export-hint">Saves to the verification log — photos and a PDF record are filed automatically.</div>
     <button class="csv-link" id="export-btn" type="button">Download CSV instead (offline backup)</button>
@@ -520,14 +533,27 @@ var CONFIG = {
   }
 
   var lastCloudCheck = 0;
-  var pendingCloud = null;   // fetched draft awaiting the Load-button confirm
 
-  function fmtSavedAt(iso) {
+  function fmtDate(iso) {
     if (!iso) return '';
     try {
       var d = new Date(iso);
-      return ' (saved ' + d.toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) + ')';
+      return d.toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
     } catch (e) { return ''; }
+  }
+  function fmtSavedAt(iso) {
+    var s = fmtDate(iso);
+    return s ? ' (saved ' + s + ')' : '';
+  }
+
+  /* Short label for a draft-history entry: Material ID if it has one yet
+     (most drafts will, since that's usually filled in first), otherwise a
+     placeholder — distinguished by its saved time either way. */
+  function draftLabel(draft) {
+    var h = (draft && draft.header) || {};
+    var mid = String(h.materialId || '').trim();
+    var proj = String(h.project || '').trim();
+    return { title: mid || '(no Material ID yet)', sub: proj };
   }
 
   function applyCloudDraft(draft, savedAt) {
@@ -544,10 +570,62 @@ var CONFIG = {
     showStatus('ok', 'Loaded the saved draft' + fmtSavedAt(savedAt) + '.');
   }
 
+  /* ---- Draft picker: up to 5 saved drafts to choose from ---- */
+  var draftPickerEl = document.getElementById('draft-picker');
+
+  function closeDraftPicker() {
+    draftPickerEl.style.display = 'none';
+    draftPickerEl.innerHTML = '';
+  }
+
+  function renderDraftPicker(list) {
+    draftPickerEl.innerHTML = '';
+    if (!list.length) {
+      closeDraftPicker();
+      return;
+    }
+    list.forEach(function (entry) {
+      var lbl = draftLabel(entry.draft);
+      var btn = el('button', 'draft-picker-item');
+      btn.type = 'button';
+      btn.appendChild(el('div', 'dp-title', lbl.title));
+      var subText = (lbl.sub ? lbl.sub + ' — ' : '') + 'saved ' + (fmtDate(entry.savedAt) || 'time unknown');
+      btn.appendChild(el('div', 'dp-sub', subText));
+      btn.addEventListener('click', function () { chooseCloudDraft(entry); });
+      draftPickerEl.appendChild(btn);
+    });
+    var cancel = el('button', 'draft-picker-cancel', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', closeDraftPicker);
+    draftPickerEl.appendChild(cancel);
+    draftPickerEl.style.display = 'block';
+  }
+
+  function chooseCloudDraft(entry) {
+    if (!isPristine()) {
+      var lbl = draftLabel(entry.draft);
+      var ok = window.confirm('Replace everything on this screen with "' + lbl.title + '"' +
+        fmtSavedAt(entry.savedAt) + '?');
+      if (!ok) return;
+    }
+    applyCloudDraft(entry.draft, entry.savedAt);
+    closeDraftPicker();
+  }
+
+  /* Normalizes either response shape (new: {drafts:[...]}, or an old-cached
+     server still answering with a single {draft, savedAt}) into a list. */
+  function draftListFrom(out) {
+    if (Array.isArray(out.drafts)) {
+      return out.drafts.filter(function (d) { return d && d.draft && d.draft.header; });
+    }
+    return (out.draft && out.draft.header) ? [{ draft: out.draft, savedAt: out.savedAt }] : [];
+  }
+
   /* auto=true runs quietly (page load, or returning to the app): it applies
-     the cloud draft only over an untouched form, and otherwise just hints
-     that one exists. The Load button calls with auto=false: an explicit
-     pull, with a confirm step when the screen already has content. */
+     the newest draft only over an untouched form, and otherwise just hints
+     that saved drafts exist. The Load button calls with auto=false: it
+     opens the picker so a specific one can be chosen; picking a non-blank
+     form's replacement asks for confirmation right there. */
   function checkCloudDraft(auto) {
     if (!CONFIG.SCRIPT_URL) return;
     if (auto) {
@@ -559,27 +637,20 @@ var CONFIG = {
       .then(function (res) { return res.json(); })
       .then(function (out) {
         if (out.status !== 'ok') throw new Error();
-        var draft = out.draft;
-        if (!draft || !draft.header) {
-          if (!auto) showStatus('err', 'No saved draft found.');
+        var list = draftListFrom(out);
+        if (!list.length) {
+          if (!auto) showStatus('err', 'No saved drafts found.');
+          return;
+        }
+        if (!auto) {
+          renderDraftPicker(list);
           return;
         }
         if (isPristine()) {
-          applyCloudDraft(draft, out.savedAt);
-        } else if (!auto) {
-          pendingCloud = { draft: draft, savedAt: out.savedAt };
-          loadBtn.classList.add('armed');
-          showStatus('err', 'This replaces what is on this screen with the saved draft' +
-            fmtSavedAt(out.savedAt) + '. Tap Load again to confirm.');
-          clearTimeout(loadArmTimer);
-          loadArmTimer = setTimeout(function () {
-            loadBtn.classList.remove('armed');
-            pendingCloud = null;
-            clearStatus();
-          }, 8000);
-        } else if (JSON.stringify(cloudDraft()) !== JSON.stringify(draft)) {
-          showStatus('ok', 'A saved draft' + fmtSavedAt(out.savedAt) +
-            ' is available — tap "Load draft" to use it.');
+          applyCloudDraft(list[0].draft, list[0].savedAt);
+        } else if (JSON.stringify(cloudDraft()) !== JSON.stringify(list[0].draft)) {
+          showStatus('ok', (list.length > 1 ? list.length + ' saved drafts' : 'A saved draft') +
+            ' available — tap "Load draft" to choose.');
         }
       })
       .catch(function () {
@@ -758,6 +829,28 @@ var CONFIG = {
       name.value = p.name || '';
       name.addEventListener('input', function () { p.name = name.value; schedulePersist(); });
       head.appendChild(name);
+
+      // Remove THIS parameter directly, instead of only ever being able to
+      // pop the last one — no need to remove 5,6,7,8 just to get rid of 4.
+      var rm = el('button', 'param-rm', '×');
+      rm.type = 'button';
+      rm.setAttribute('aria-label', 'Remove parameter ' + (i + 1));
+      rm.disabled = state.params.length <= 1;
+      rm.addEventListener('click', function () {
+        // Short window — just long enough to swallow a genuine double-fire
+        // of a single physical tap, short enough that rapid-tapping several
+        // DIFFERENT rows' × buttons in a row (a real cleanup workflow) isn't
+        // held up waiting on it.
+        var now = Date.now();
+        if (now - lastParamRemoveTime < 200) return;
+        lastParamRemoveTime = now;
+        if (state.params.length > 1) {
+          state.params.splice(i, 1);
+          renderParams();
+          schedulePersist();
+        }
+      });
+      head.appendChild(rm);
       box.appendChild(head);
 
       var opts = el('div', 'opts wrap-opts');
@@ -799,21 +892,7 @@ var CONFIG = {
       renderParams();
       schedulePersist();
     });
-    var minus = el('button', 'pbtn', '− Remove last');
-    minus.type = 'button';
-    minus.disabled = state.params.length <= 1;
-    minus.addEventListener('click', function () {
-      var now = Date.now();
-      if (now - lastParamRemoveTime < 500) return;
-      lastParamRemoveTime = now;
-      if (state.params.length > 1) {
-        state.params.pop();
-        renderParams();
-        schedulePersist();
-      }
-    });
     ctrl.appendChild(plus);
-    ctrl.appendChild(minus);
     host.appendChild(ctrl);
   }
 
@@ -987,6 +1066,7 @@ var CONFIG = {
     toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 2000);
     saveDefaults();   // remember project / phase / verifier before the reset
     clearDraft();
+    closeDraftPicker();
     resetForm();
   }
 
@@ -1166,6 +1246,7 @@ var CONFIG = {
 
   saveBtn.addEventListener('click', function () {
     clearStatus();
+    closeDraftPicker();
     clearTimeout(persistTimer);
     saveDraft();   // always lock in locally first, even with no signal
     if (!CONFIG.SCRIPT_URL) {
@@ -1196,20 +1277,12 @@ var CONFIG = {
       });
   });
 
-  /* ============ Load draft (explicit cloud pull) ============ */
+  /* ============ Load draft (explicit cloud pull — opens the picker) ====== */
   var loadBtn = document.getElementById('load-btn');
-  var loadArmTimer = null;
 
   loadBtn.addEventListener('click', function () {
-    if (loadBtn.classList.contains('armed') && pendingCloud) {
-      clearTimeout(loadArmTimer);
-      loadBtn.classList.remove('armed');
-      var pc = pendingCloud;
-      pendingCloud = null;
-      applyCloudDraft(pc.draft, pc.savedAt);
-      return;
-    }
     clearStatus();
+    closeDraftPicker();   // in case it was already open; re-fetch fresh
     checkCloudDraft(false);
   });
 
@@ -1231,6 +1304,7 @@ var CONFIG = {
     clearTimeout(resetArmTimer);
     resetBtn.classList.remove('armed');
     clearDraft();
+    closeDraftPicker();
     resetForm();
   });
 
