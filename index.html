@@ -127,10 +127,16 @@
   .export-hint{font-size:12px;color:var(--gray-500)}
   .csv-link{background:none;border:none;padding:4px;font-size:12.5px;font-weight:600;color:var(--liro-blue);cursor:pointer;text-decoration:underline}
   .csv-link:hover{color:var(--liro-blue-dark)}
+  .draft-row{display:flex;gap:8px;justify-content:center;width:100%;max-width:420px}
+  .sbtn{flex:1 1 0;min-height:44px;padding:9px 16px;border-radius:5px;border:1px solid var(--gray-300);background:#fff;color:var(--gray-700);font-size:13px;font-weight:600;cursor:pointer}
+  .sbtn:hover{border-color:var(--liro-blue);color:var(--liro-blue)}
+  .sbtn:disabled{opacity:.5;cursor:not-allowed}
+  .sbtn.armed{border-color:var(--error);color:var(--error);background:var(--error-bg)}
 
   /* ---- Status + toast ---- */
   .status{display:none;font-size:14px;font-weight:600;line-height:1.4;padding:10px 14px;border-radius:5px;max-width:420px}
   .status.err{display:block;background:var(--error-bg);color:var(--error)}
+  .status.ok{display:block;background:var(--success-bg);color:var(--success)}
   .field input.invalid{border-color:var(--error)}
   .needs-answer{background:var(--warning-bg)}
   .toast{position:fixed;top:24px;left:50%;transform:translateX(-50%);background:var(--liro-navy);color:#fff;padding:12px 20px;border-radius:5px;display:none;align-items:center;gap:8px;font-size:14px;font-weight:600;box-shadow:0 12px 28px rgba(0,38,58,.12),0 4px 8px rgba(0,38,58,.06);z-index:100}
@@ -215,6 +221,10 @@
 
   <div class="export-wrap">
     <div class="status" id="status-msg"></div>
+    <div class="draft-row">
+      <button class="sbtn" id="save-btn" type="button">Save draft</button>
+      <button class="sbtn" id="reset-btn" type="button">Reset form</button>
+    </div>
     <button class="export-btn" id="submit-btn" type="button">Submit Verification</button>
     <div class="export-hint">Saves to the verification log — photos and a PDF record are filed automatically.</div>
     <button class="csv-link" id="export-btn" type="button">Download CSV instead (offline backup)</button>
@@ -366,17 +376,22 @@ var CONFIG = {
     }
   }
 
+  function applyDraftObject(d) {
+    Object.assign(state.header, d.header);
+    if (d.checks) state.checks = d.checks;
+    if (d.params && d.params.length) state.params = d.params;
+    if (d.photos) state.photos = d.photos;
+    Object.assign(state.liro, d.liro || {});
+    Object.assign(state.con, d.con || {});
+  }
+
   function loadDraft() {
     try {
       var d = JSON.parse(localStorage.getItem(DRAFT_KEY));
-      if (!d || !d.header) return;
-      Object.assign(state.header, d.header);
-      if (d.checks) state.checks = d.checks;
-      if (d.params && d.params.length) state.params = d.params;
-      if (d.photos) state.photos = d.photos;
-      Object.assign(state.liro, d.liro || {});
-      Object.assign(state.con, d.con || {});
-    } catch (e) { /* corrupt draft — start fresh */ }
+      if (!d || !d.header) return false;
+      applyDraftObject(d);
+      return true;
+    } catch (e) { return false; /* corrupt draft — start fresh */ }
   }
 
   function clearDraft() {
@@ -384,6 +399,55 @@ var CONFIG = {
       localStorage.removeItem(DRAFT_KEY);
       localStorage.removeItem(SID_KEY);
     } catch (e) {}
+  }
+
+  /* ============ Cloud draft (cross-device) ============
+     "Save draft" pushes the typed fields to the backend, which keeps ONE
+     shared draft in a hidden tab of the Sheet. A device that opens the app
+     with an untouched form pulls it down automatically — fill it out at the
+     desk, open the phone at the dock, it's there. Photos are too big to
+     sync and stay on the device that took them; a successful Submit clears
+     the shared draft. */
+  function cloudDraft() {
+    // text fields only — no photos
+    return { header: state.header, checks: state.checks, params: state.params, liro: state.liro, con: state.con };
+  }
+
+  /* True while nothing meaningful has been entered on THIS device (smart
+     defaults like project/phase/dates don't count) — the only state the
+     cloud draft is allowed to overwrite. */
+  function isPristine() {
+    var h = state.header;
+    if (h.materialId || h.submittal || h.model || h.location) return false;
+    if (h.recordId && h.recordId !== 'V-') return false;
+    var touched = false;
+    Object.keys(state.checks).forEach(function (g) {
+      state.checks[g].forEach(function (v) { if (v) touched = true; });
+    });
+    if (touched) return false;
+    if (state.params.length > 1 || state.params[0].name || state.params[0].result) return false;
+    for (var i = 0; i < state.photos.length; i++) {
+      if (state.photos[i].length) return false;
+    }
+    if (state.con.name || state.con.status) return false;
+    return true;
+  }
+
+  function maybeLoadCloudDraft(hadLocalDraft) {
+    if (hadLocalDraft || !CONFIG.SCRIPT_URL) return;
+    fetch(CONFIG.SCRIPT_URL + '?draft=1')
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status === 'ok' && out.draft && out.draft.header && isPristine()) {
+          applyDraftObject(out.draft);
+          applyDefaults();
+          renderAll();
+          setSignoffInputs();
+          schedulePersist();   // it's now this device's local draft too
+          showStatus('ok', 'Loaded the saved draft.');
+        }
+      })
+      .catch(function () { /* offline — the local draft story still works */ });
   }
 
   /* ============ Smart defaults ============
@@ -670,6 +734,15 @@ var CONFIG = {
   document.getElementById('liro-date').addEventListener('input', function (e) { state.liro.date = e.target.value; schedulePersist(); });
   document.getElementById('con-name').addEventListener('input', function (e) { state.con.name = e.target.value; schedulePersist(); });
 
+  function renderAll() {
+    renderHeader(); renderChecks(); renderParams(); renderPhotos(); renderCon();
+  }
+  function setSignoffInputs() {
+    document.getElementById('liro-name').value = state.liro.name;
+    document.getElementById('liro-date').value = state.liro.date;
+    document.getElementById('con-name').value = state.con.name;
+  }
+
   /* ============ CSV export ============ */
   function exportCsv() {
     var s = state;
@@ -741,10 +814,8 @@ var CONFIG = {
     showNeeds = false;
     incompleteWarned = 0;
     applyDefaults();
-    renderHeader(); renderChecks(); renderParams(); renderPhotos(); renderCon();
-    document.getElementById('liro-name').value = state.liro.name;
-    document.getElementById('liro-date').value = state.liro.date;
-    document.getElementById('con-name').value = state.con.name;
+    renderAll();
+    setSignoffInputs();
     clearStatus();
     window.scrollTo({ top: 0 });
   }
@@ -882,17 +953,68 @@ var CONFIG = {
       });
   });
 
+  /* ============ Save draft (cross-device) ============ */
+  var saveBtn = document.getElementById('save-btn');
+
+  saveBtn.addEventListener('click', function () {
+    clearStatus();
+    clearTimeout(persistTimer);
+    saveDraft();   // always lock in locally first, even with no signal
+    if (!CONFIG.SCRIPT_URL) {
+      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
+      return;
+    }
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    fetch(CONFIG.SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'saveDraft', draft: cloudDraft() })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status === 'ok') {
+          showStatus('ok', 'Draft saved — opening the app on any device will load it. (Photos stay on this device.)');
+        } else {
+          throw new Error(out.message || 'rejected');
+        }
+      })
+      .catch(function () {
+        showStatus('err', "Couldn't reach the cloud — the draft IS saved on this device. Check signal and tap Save again.");
+      })
+      .then(function () {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save draft';
+      });
+  });
+
+  /* ============ Reset form (two-tap confirm) ============ */
+  var resetBtn = document.getElementById('reset-btn');
+  var resetArmTimer = null;
+
+  resetBtn.addEventListener('click', function () {
+    if (!resetBtn.classList.contains('armed')) {
+      resetBtn.classList.add('armed');
+      showStatus('err', 'This clears the whole form on this device (a cloud-saved draft is kept). Tap Reset again to confirm.');
+      clearTimeout(resetArmTimer);
+      resetArmTimer = setTimeout(function () {
+        resetBtn.classList.remove('armed');
+        clearStatus();
+      }, 6000);
+      return;
+    }
+    clearTimeout(resetArmTimer);
+    resetBtn.classList.remove('armed');
+    clearDraft();
+    resetForm();
+  });
+
   /* ============ Init ============ */
-  loadDraft();
+  var hadLocalDraft = loadDraft();
   applyDefaults();
-  renderHeader();
-  renderChecks();
-  renderParams();
-  renderPhotos();
-  renderCon();
-  document.getElementById('liro-name').value = state.liro.name;
-  document.getElementById('liro-date').value = state.liro.date;
-  document.getElementById('con-name').value = state.con.name;
+  renderAll();
+  setSignoffInputs();
+  maybeLoadCloudDraft(hadLocalDraft);
 })();
 </script>
 </body>
