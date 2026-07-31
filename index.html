@@ -144,6 +144,9 @@
   .draft-picker-item .dp-sub{font-size:11.5px;color:var(--gray-500)}
   .draft-picker-cancel{width:100%;min-height:40px;padding:8px;border:none;background:var(--gray-50);color:var(--gray-600);font-size:12.5px;font-weight:600;cursor:pointer;border-top:1px solid var(--gray-200)}
   .draft-picker-cancel:hover{background:var(--gray-100)}
+  .preset-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .preset-row .sbtn{flex:1 1 auto}
+  .preset-picker{max-width:none;margin-top:8px}
 
   /* ---- Status + toast ---- */
   .status{display:none;font-size:14px;font-weight:600;line-height:1.4;padding:10px 14px;border-radius:5px;max-width:420px}
@@ -200,6 +203,12 @@
   <div class="card">
     <div class="card-title">Parameter Verification</div>
     <div class="card-hint">Name each parameter being verified, then check one — write the observed value only when Other. Use + to add a parameter, × to remove one.</div>
+    <div class="preset-row">
+      <button class="sbtn" id="preset-load-btn" type="button">Load preset</button>
+      <button class="sbtn" id="preset-save-btn" type="button">Overwrite preset</button>
+      <button class="sbtn" id="preset-add-btn" type="button">Add preset</button>
+    </div>
+    <div class="draft-picker preset-picker" id="preset-picker" style="display:none"></div>
     <div id="params"></div>
   </div>
 
@@ -658,6 +667,239 @@ var CONFIG = {
       });
   }
 
+  /* ============ Parameter presets ============
+     A preset is a reusable, named parameter list (just the names — results
+     are always answered per delivery). Four built-in defaults ship with the
+     app; "Overwrite preset" and "Add preset" store to the backend's hidden
+     _Presets tab, so a change made on any device is permanent for everyone.
+     A stored preset with a default's name overrides that default. */
+  var DEFAULT_PRESETS = [
+    { name: 'MEP',                      params: ['Placeholder parameter'] },
+    { name: 'Electrical',               params: ['Placeholder parameter'] },
+    { name: 'Plumbing/Fire Protection', params: ['Placeholder parameter'] },
+    { name: 'Bulk Material',            params: ['Placeholder parameter'] }
+  ];
+  var PRESETS_CACHE_KEY = 'dv-presets';
+
+  function cachedCustomPresets() {
+    try {
+      var a = JSON.parse(localStorage.getItem(PRESETS_CACHE_KEY));
+      return normalizePresets(a);
+    } catch (e) { return []; }
+  }
+  function cacheCustomPresets(list) {
+    try { localStorage.setItem(PRESETS_CACHE_KEY, JSON.stringify(list)); } catch (e) {}
+  }
+
+  /* Same defensive posture as drafts: preset data can come from the
+     unauthenticated endpoint or stale cache, so every entry is coerced to
+     {name, params:[non-empty strings]} or dropped. */
+  function normalizePresets(arr) {
+    if (!Array.isArray(arr)) return [];
+    var out = [];
+    arr.forEach(function (p) {
+      if (!p || typeof p !== 'object') return;
+      var name = String(p.name || '').trim();
+      if (!name) return;
+      var params = Array.isArray(p.params)
+        ? p.params.map(function (n) { return String(n == null ? '' : n).trim(); })
+            .filter(function (n) { return n; }).slice(0, 50)
+        : [];
+      if (!params.length) return;
+      out.push({ name: name, params: params });
+    });
+    return out;
+  }
+
+  /* Defaults first (stable order), overridden by any stored preset with the
+     same name (case-insensitive), then extra stored presets after. */
+  function mergePresets(custom) {
+    var out = [];
+    var byName = {};
+    DEFAULT_PRESETS.forEach(function (p) {
+      var copy = { name: p.name, params: p.params.slice() };
+      byName[p.name.toLowerCase()] = copy;
+      out.push(copy);
+    });
+    custom.forEach(function (p) {
+      var k = p.name.toLowerCase();
+      if (byName[k]) {
+        byName[k].params = p.params.slice();
+      } else {
+        byName[k] = p;
+        out.push(p);
+      }
+    });
+    return out;
+  }
+
+  /* done(list, offline) — offline=true means the cloud couldn't be reached
+     and the list is defaults + the last copy this device saw. */
+  function fetchPresets(done) {
+    var fallback = function () { done(mergePresets(cachedCustomPresets()), true); };
+    if (!CONFIG.SCRIPT_URL) { fallback(); return; }
+    fetch(CONFIG.SCRIPT_URL + '?presets=1')
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status !== 'ok') throw new Error();
+        var custom = normalizePresets(out.presets);
+        cacheCustomPresets(custom);
+        done(mergePresets(custom), false);
+      })
+      .catch(fallback);
+  }
+
+  var presetPickerEl = document.getElementById('preset-picker');
+
+  function closePresetPicker() {
+    presetPickerEl.style.display = 'none';
+    presetPickerEl.innerHTML = '';
+  }
+
+  function renderPresetPicker(list, onPick) {
+    presetPickerEl.innerHTML = '';
+    list.forEach(function (p) {
+      var btn = el('button', 'draft-picker-item');
+      btn.type = 'button';
+      btn.appendChild(el('div', 'dp-title', p.name));
+      btn.appendChild(el('div', 'dp-sub',
+        p.params.length + (p.params.length === 1 ? ' parameter' : ' parameters')));
+      btn.addEventListener('click', function () { onPick(p); });
+      presetPickerEl.appendChild(btn);
+    });
+    var cancel = el('button', 'draft-picker-cancel', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', closePresetPicker);
+    presetPickerEl.appendChild(cancel);
+    presetPickerEl.style.display = 'block';
+  }
+
+  /* Anything beyond the single blank starter row counts as content worth a
+     confirmation before a preset replaces it. */
+  function paramsTouched() {
+    return state.params.length > 1 ||
+      !!(state.params[0].name || state.params[0].result || state.params[0].observed);
+  }
+
+  function applyPreset(p) {
+    state.params = p.params.map(function (n) { return { name: n, observed: '', result: null }; });
+    renderParams();
+    schedulePersist();
+    showStatus('ok', 'Loaded preset "' + p.name + '" — ' + p.params.length +
+      (p.params.length === 1 ? ' parameter.' : ' parameters.'));
+  }
+
+  function currentParamNames() {
+    return state.params.map(function (p) { return String(p.name || '').trim(); })
+      .filter(function (n) { return n; });
+  }
+
+  function savePresetToCloud(name) {
+    var params = currentParamNames();
+    if (!params.length) {
+      showStatus('err', 'Name at least one parameter before saving it to a preset.');
+      return;
+    }
+    if (!CONFIG.SCRIPT_URL) {
+      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
+      return;
+    }
+    showStatus('ok', 'Saving preset "' + name + '"…');
+    fetch(CONFIG.SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'savePreset', preset: { name: name, params: params } })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status !== 'ok') throw new Error(out.message || 'rejected');
+        // Keep the offline copy in step so the picker is right even before
+        // the next successful fetch.
+        var custom = cachedCustomPresets();
+        var found = false;
+        custom.forEach(function (p) {
+          if (p.name.toLowerCase() === name.toLowerCase()) { p.params = params.slice(); found = true; }
+        });
+        if (!found) custom.push({ name: name, params: params.slice() });
+        cacheCustomPresets(custom);
+        showStatus('ok', 'Preset "' + name + '" saved — it\'s now available on every device.');
+      })
+      .catch(function (err) {
+        showStatus('err', (err && err.message && err.message !== 'rejected')
+          ? err.message
+          : "Couldn't save the preset — check signal and try again.");
+      });
+  }
+
+  var presetLoadBtn = document.getElementById('preset-load-btn');
+  var presetSaveBtn = document.getElementById('preset-save-btn');
+  var presetAddBtn = document.getElementById('preset-add-btn');
+
+  presetLoadBtn.addEventListener('click', function () {
+    clearStatus();
+    closeDraftPicker();
+    closePresetPicker();
+    presetLoadBtn.disabled = true;
+    presetLoadBtn.textContent = 'Loading…';
+    fetchPresets(function (list, offline) {
+      presetLoadBtn.disabled = false;
+      presetLoadBtn.textContent = 'Load preset';
+      renderPresetPicker(list, function (p) {
+        if (paramsTouched() &&
+            !window.confirm('Replace the current parameters with preset "' + p.name + '"?')) return;
+        applyPreset(p);
+        closePresetPicker();
+      });
+      if (offline) showStatus('err', "Couldn't reach the cloud — showing this device's last-known presets.");
+    });
+  });
+
+  presetSaveBtn.addEventListener('click', function () {
+    clearStatus();
+    closeDraftPicker();
+    closePresetPicker();
+    var params = currentParamNames();
+    if (!params.length) {
+      showStatus('err', 'Name at least one parameter before saving it to a preset.');
+      return;
+    }
+    presetSaveBtn.disabled = true;
+    presetSaveBtn.textContent = 'Loading…';
+    fetchPresets(function (list) {
+      presetSaveBtn.disabled = false;
+      presetSaveBtn.textContent = 'Overwrite preset';
+      renderPresetPicker(list, function (p) {
+        var ok = window.confirm('Overwrite preset "' + p.name + '" with the current ' +
+          params.length + (params.length === 1 ? ' parameter' : ' parameters') +
+          '? This changes it permanently for everyone.');
+        if (!ok) return;
+        closePresetPicker();
+        savePresetToCloud(p.name);
+      });
+    });
+  });
+
+  presetAddBtn.addEventListener('click', function () {
+    clearStatus();
+    closeDraftPicker();
+    closePresetPicker();
+    var params = currentParamNames();
+    if (!params.length) {
+      showStatus('err', 'Name at least one parameter before saving it to a preset.');
+      return;
+    }
+    var name = window.prompt('Name for the new preset (e.g. "HVAC Equipment"):');
+    if (name == null) return;
+    name = name.trim().slice(0, 80);
+    if (!name) return;
+    var exists = mergePresets(cachedCustomPresets()).some(function (p) {
+      return p.name.toLowerCase() === name.toLowerCase();
+    });
+    if (exists &&
+        !window.confirm('A preset named "' + name + '" already exists — overwrite it?')) return;
+    savePresetToCloud(name);
+  });
+
   /* ============ Smart defaults ============
      Same person, same project, every day: remember Project, Phase, and the
      verifier's name across submissions, and pre-fill today's dates. Only
@@ -1067,6 +1309,7 @@ var CONFIG = {
     saveDefaults();   // remember project / phase / verifier before the reset
     clearDraft();
     closeDraftPicker();
+    closePresetPicker();
     resetForm();
   }
 
@@ -1283,6 +1526,7 @@ var CONFIG = {
   loadBtn.addEventListener('click', function () {
     clearStatus();
     closeDraftPicker();   // in case it was already open; re-fetch fresh
+    closePresetPicker();
     checkCloudDraft(false);
   });
 
@@ -1305,6 +1549,7 @@ var CONFIG = {
     resetBtn.classList.remove('armed');
     clearDraft();
     closeDraftPicker();
+    closePresetPicker();
     resetForm();
   });
 
