@@ -343,6 +343,24 @@ var CONFIG = {
     return b;
   }
 
+  /* A stalled mobile connection can leave a fetch pending for minutes with
+     no error — long enough to strand a disabled "Loading…"/"Saving…" button
+     with no retry path. Abort after a bounded wait so the caller's .catch
+     (offline fallback, error message, re-enabled button) actually runs. The
+     Submit path has its own longer 90s budget (photos + PDF); these small
+     text calls get a short one. */
+  var CLOUD_TIMEOUT_MS = 15000;
+  function fetchWithTimeout(url, opts, ms) {
+    opts = opts || {};
+    var ctrl = window.AbortController ? new AbortController() : null;
+    if (ctrl) opts.signal = ctrl.signal;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, ms || CLOUD_TIMEOUT_MS) : null;
+    return fetch(url, opts).then(
+      function (res) { clearTimeout(timer); return res; },
+      function (err) { clearTimeout(timer); throw err; }
+    );
+  }
+
   /* Compress photos client-side to keep POSTs small. Equipment shots use
      the field-app limits (1600px / 0.7); the packing-slip section gets more
      resolution so fine print on a BOL stays legible. Indexed like
@@ -380,6 +398,7 @@ var CONFIG = {
      refresh: state is saved to localStorage as it changes, restored on
      load, and cleared only after a successful submit. */
   var DRAFT_KEY = 'dv-draft';
+  var PHOTO_KEY = 'dv-photos';
   var SID_KEY = 'dv-sid';
   var persistTimer = null;
 
@@ -388,17 +407,27 @@ var CONFIG = {
     persistTimer = setTimeout(saveDraft, 500);
   }
 
+  // Typed fields only — the frequent, keystroke-driven write. Photos are
+  // multi-MB of base64 and live in their own key (savePhotos), written only
+  // when they actually change, so a 500ms-after-every-keystroke persist
+  // isn't re-serializing several full-camera photos and stuttering the
+  // keyboard on budget phones.
   function saveDraft() {
     try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify(state));
-    } catch (e) {
-      // Quota exceeded (photos too big) — keep at least the typed fields.
-      try {
-        var slim = JSON.parse(JSON.stringify(state));
-        slim.photos = [[],[],[],[]];
-        localStorage.setItem(DRAFT_KEY, JSON.stringify(slim));
-      } catch (e2) { /* private mode etc. — drafts just don't persist */ }
-    }
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({
+        header: state.header, checks: state.checks, params: state.params,
+        liro: state.liro, con: state.con
+      }));
+    } catch (e) { /* private mode etc. — drafts just don't persist */ }
+  }
+
+  // Written only from the photo add/remove paths. Its own try/catch: a photo
+  // set can blow the ~5MB quota where the text draft never will, and if it
+  // does the typed fields still persist (photos just won't survive a reload).
+  function savePhotos() {
+    try {
+      localStorage.setItem(PHOTO_KEY, JSON.stringify(state.photos));
+    } catch (e) {}
   }
 
   var CHECK_GROUP_KEYS = ['Identity', 'Condition', 'Documents'];
@@ -492,6 +521,12 @@ var CONFIG = {
     try {
       var d = JSON.parse(localStorage.getItem(DRAFT_KEY));
       if (!d || !d.header) return false;
+      // Photos are stored under their own key — fold them back in so
+      // applyDraftObject's normalizePhotos sees them.
+      try {
+        var ph = JSON.parse(localStorage.getItem(PHOTO_KEY));
+        if (Array.isArray(ph)) d.photos = ph;
+      } catch (e2) {}
       applyDraftObject(d);
       return true;
     } catch (e) { return false; /* corrupt draft — start fresh */ }
@@ -500,6 +535,7 @@ var CONFIG = {
   function clearDraft() {
     try {
       localStorage.removeItem(DRAFT_KEY);
+      localStorage.removeItem(PHOTO_KEY);
       localStorage.removeItem(SID_KEY);
     } catch (e) {}
   }
@@ -566,6 +602,12 @@ var CONFIG = {
   }
 
   function applyCloudDraft(draft, savedAt) {
+    // Close any open picker first — this replaces the whole form, so a
+    // draft/preset picker left open (e.g. an auto-apply firing on resume
+    // while a picker sat open) would otherwise invite a pick against
+    // content the user never saw.
+    closeDraftPicker();
+    closePresetPicker();
     applyDraftObject(draft, { skipPhotos: true });
     // Wholesale content replacement — any earlier "N items unanswered"
     // warning belonged to the form that's gone now.
@@ -581,8 +623,14 @@ var CONFIG = {
 
   /* ---- Draft picker: up to 5 saved drafts to choose from ---- */
   var draftPickerEl = document.getElementById('draft-picker');
+  // Bumped on every open-request AND every close; an in-flight fetch only
+  // renders its picker if its captured token is still current — so a late
+  // response can't pop a picker back open over a form the user has since
+  // Reset/Submitted/switched away from, or leave two pickers open at once.
+  var draftReqSeq = 0;
 
   function closeDraftPicker() {
+    draftReqSeq++;
     draftPickerEl.style.display = 'none';
     draftPickerEl.innerHTML = '';
   }
@@ -642,7 +690,10 @@ var CONFIG = {
       if (now - lastCloudCheck < 15000) return;
       lastCloudCheck = now;
     }
-    fetch(CONFIG.SCRIPT_URL + '?draft=1')
+    // Claim a token for a manual (picker-opening) request so a stale response
+    // that lands after the user moved on is ignored.
+    var seq = auto ? 0 : ++draftReqSeq;
+    fetchWithTimeout(CONFIG.SCRIPT_URL + '?draft=1')
       .then(function (res) { return res.json(); })
       .then(function (out) {
         if (out.status !== 'ok') throw new Error();
@@ -652,6 +703,7 @@ var CONFIG = {
           return;
         }
         if (!auto) {
+          if (seq !== draftReqSeq) return;   // superseded — don't reopen
           renderDraftPicker(list);
           return;
         }
@@ -694,6 +746,11 @@ var CONFIG = {
   /* Same defensive posture as drafts: preset data can come from the
      unauthenticated endpoint or stale cache, so every entry is coerced to
      {name, params:[non-empty strings]} or dropped. */
+  function isReservedName(name) {
+    var n = String(name).trim().toLowerCase();
+    return n === '__proto__' || n === 'prototype' || n === 'constructor';
+  }
+
   function normalizePresets(arr) {
     if (!Array.isArray(arr)) return [];
     var out = [];
@@ -701,6 +758,10 @@ var CONFIG = {
       if (!p || typeof p !== 'object') return;
       var name = String(p.name || '').trim();
       if (!name) return;
+      // Drop a name that aliases an Object.prototype key — the server now
+      // refuses these, but an older stored row (or a direct POST) must never
+      // reach mergePresets as a live map key on the client either.
+      if (isReservedName(name)) return;
       var params = Array.isArray(p.params)
         ? p.params.map(function (n) { return String(n == null ? '' : n).trim(); })
             .filter(function (n) { return n; }).slice(0, 50)
@@ -715,7 +776,9 @@ var CONFIG = {
      same name (case-insensitive), then extra stored presets after. */
   function mergePresets(custom) {
     var out = [];
-    var byName = {};
+    // Null-prototype map so a name like "__proto__" is an ordinary key, not
+    // a path to Object.prototype (defense-in-depth alongside isReservedName).
+    var byName = Object.create(null);
     DEFAULT_PRESETS.forEach(function (p) {
       var copy = { name: p.name, params: p.params.slice() };
       byName[p.name.toLowerCase()] = copy;
@@ -738,10 +801,15 @@ var CONFIG = {
   function fetchPresets(done) {
     var fallback = function () { done(mergePresets(cachedCustomPresets()), true); };
     if (!CONFIG.SCRIPT_URL) { fallback(); return; }
-    fetch(CONFIG.SCRIPT_URL + '?presets=1')
+    fetchWithTimeout(CONFIG.SCRIPT_URL + '?presets=1')
       .then(function (res) { return res.json(); })
       .then(function (out) {
-        if (out.status !== 'ok') throw new Error();
+        // A missing/non-array presets field means this isn't a presets-aware
+        // server (e.g. the old script during the deploy window, which just
+        // returns {status:'ok', message:'...'}). Treat it as a miss and fall
+        // back — NOT as "zero presets", which would wipe the device's cache
+        // that the offline path depends on.
+        if (out.status !== 'ok' || !Array.isArray(out.presets)) throw new Error();
         var custom = normalizePresets(out.presets);
         cacheCustomPresets(custom);
         done(mergePresets(custom), false);
@@ -750,8 +818,11 @@ var CONFIG = {
   }
 
   var presetPickerEl = document.getElementById('preset-picker');
+  // Same in-flight-request guard as the draft picker (see draftReqSeq).
+  var presetReqSeq = 0;
 
   function closePresetPicker() {
+    presetReqSeq++;
     presetPickerEl.style.display = 'none';
     presetPickerEl.innerHTML = '';
   }
@@ -783,7 +854,14 @@ var CONFIG = {
 
   function applyPreset(p) {
     state.params = p.params.map(function (n) { return { name: n, observed: '', result: null }; });
+    // A fresh parameter set: clear any prior "N unanswered" warning state so
+    // the new rows aren't instantly painted as needs-answer and the next
+    // Submit re-warns for the new content (mirrors applyCloudDraft).
+    var wasShowing = showNeeds;
+    showNeeds = false;
+    incompleteWarned = 0;
     renderParams();
+    if (wasShowing) renderChecks();   // clear check-row highlights too
     schedulePersist();
     showStatus('ok', 'Loaded preset "' + p.name + '" — ' + p.params.length +
       (p.params.length === 1 ? ' parameter.' : ' parameters.'));
@@ -805,7 +883,7 @@ var CONFIG = {
       return;
     }
     showStatus('ok', 'Saving preset "' + name + '"…');
-    fetch(CONFIG.SCRIPT_URL, {
+    fetchWithTimeout(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ action: 'savePreset', preset: { name: name, params: params } })
@@ -839,11 +917,13 @@ var CONFIG = {
     clearStatus();
     closeDraftPicker();
     closePresetPicker();
+    var seq = ++presetReqSeq;
     presetLoadBtn.disabled = true;
     presetLoadBtn.textContent = 'Loading…';
     fetchPresets(function (list, offline) {
       presetLoadBtn.disabled = false;
       presetLoadBtn.textContent = 'Load preset';
+      if (seq !== presetReqSeq) return;   // superseded while in flight
       renderPresetPicker(list, function (p) {
         if (paramsTouched() &&
             !window.confirm('Replace the current parameters with preset "' + p.name + '"?')) return;
@@ -858,17 +938,27 @@ var CONFIG = {
     clearStatus();
     closeDraftPicker();
     closePresetPicker();
-    var params = currentParamNames();
-    if (!params.length) {
+    if (!currentParamNames().length) {
       showStatus('err', 'Name at least one parameter before saving it to a preset.');
       return;
     }
+    var seq = ++presetReqSeq;
     presetSaveBtn.disabled = true;
     presetSaveBtn.textContent = 'Loading…';
     fetchPresets(function (list) {
       presetSaveBtn.disabled = false;
       presetSaveBtn.textContent = 'Overwrite preset';
+      if (seq !== presetReqSeq) return;   // superseded while in flight
       renderPresetPicker(list, function (p) {
+        // Recompute at pick time — the form stayed editable while the picker
+        // was open, so the confirm must describe the list that will actually
+        // be written, not the count captured when the button was tapped.
+        var params = currentParamNames();
+        if (!params.length) {
+          closePresetPicker();
+          showStatus('err', 'Name at least one parameter before saving it to a preset.');
+          return;
+        }
         var ok = window.confirm('Overwrite preset "' + p.name + '" with the current ' +
           params.length + (params.length === 1 ? ' parameter' : ' parameters') +
           '? This changes it permanently for everyone.');
@@ -883,8 +973,7 @@ var CONFIG = {
     clearStatus();
     closeDraftPicker();
     closePresetPicker();
-    var params = currentParamNames();
-    if (!params.length) {
+    if (!currentParamNames().length) {
       showStatus('err', 'Name at least one parameter before saving it to a preset.');
       return;
     }
@@ -892,12 +981,30 @@ var CONFIG = {
     if (name == null) return;
     name = name.trim().slice(0, 80);
     if (!name) return;
-    var exists = mergePresets(cachedCustomPresets()).some(function (p) {
-      return p.name.toLowerCase() === name.toLowerCase();
+    if (isReservedName(name)) {
+      showStatus('err', 'That preset name is reserved — pick another.');
+      return;
+    }
+    // Check the FRESH shared list, not just this device's cache: a phone that
+    // hasn't loaded presets recently would otherwise skip the "already
+    // exists" warning and silently overwrite a teammate's same-named preset
+    // (the server upserts by name).
+    presetAddBtn.disabled = true;
+    presetAddBtn.textContent = 'Checking…';
+    fetchPresets(function (list, offline) {
+      presetAddBtn.disabled = false;
+      presetAddBtn.textContent = 'Add preset';
+      var exists = list.some(function (p) { return p.name.toLowerCase() === name.toLowerCase(); });
+      if (exists) {
+        if (!window.confirm('A preset named "' + name + '"' +
+            (offline ? " exists on this device's last-known list" : ' already exists') +
+            ' — overwrite it?')) return;
+      } else if (offline) {
+        if (!window.confirm("Couldn't check the shared list (no signal). Save \"" + name +
+            '" anyway? If a teammate already used this name, it will be overwritten.')) return;
+      }
+      savePresetToCloud(name);
     });
-    if (exists &&
-        !window.confirm('A preset named "' + name + '" already exists — overwrite it?')) return;
-    savePresetToCloud(name);
   });
 
   /* ============ Smart defaults ============
@@ -1156,7 +1263,7 @@ var CONFIG = {
         rm.addEventListener('click', function () {
           state.photos[i].splice(j, 1);
           renderPhotos();
-          schedulePersist();
+          savePhotos();
         });
         t.appendChild(rm);
         row.appendChild(t);
@@ -1195,7 +1302,7 @@ var CONFIG = {
             if (state.photos[i] === target) {
               target.push(dataUrl);
               renderPhotos();
-              schedulePersist();
+              savePhotos();
             }
             next();
           }, function () {
@@ -1498,7 +1605,7 @@ var CONFIG = {
     }
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
-    fetch(CONFIG.SCRIPT_URL, {
+    fetchWithTimeout(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ action: 'saveDraft', draft: cloudDraft() })
