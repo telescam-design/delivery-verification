@@ -348,6 +348,12 @@ var CONFIG = {
   var CLOUD_TIMEOUT_MS = 15000;
   function fetchWithTimeout(url, opts, ms) {
     opts = opts || {};
+    // Never send Google cookies: a phone signed into multiple Google
+    // accounts can get routed to the wrong account context and served a
+    // "Sorry, unable to open the file" page instead of JSON. Anonymous
+    // requests always work (the endpoint is access:Anyone), so force every
+    // request from the app to be anonymous.
+    opts.credentials = 'omit';
     var ctrl = window.AbortController ? new AbortController() : null;
     if (ctrl) opts.signal = ctrl.signal;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, ms || CLOUD_TIMEOUT_MS) : null;
@@ -1576,11 +1582,14 @@ var CONFIG = {
       var ctrl = window.AbortController ? new AbortController() : null;
       var abortTimer = ctrl ? setTimeout(function () { ctrl.abort(); }, SUBMIT_TIMEOUT_MS) : null;
 
-      // text/plain avoids the CORS preflight Apps Script can't answer
+      // text/plain avoids the CORS preflight Apps Script can't answer;
+      // credentials:'omit' keeps Google cookies out (multi-account phones
+      // otherwise get bounced to a "Sorry, unable to open the file" page).
       fetch(CONFIG.SCRIPT_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(payload),
+        credentials: 'omit',
         signal: ctrl ? ctrl.signal : undefined
       })
         .then(function (res) { return res.json(); })
