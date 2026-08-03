@@ -280,7 +280,7 @@ var CONFIG = {
   /* ============ State ============ */
   var state = {
     header: { project:'', phase:'', materialId:'', recordId:'V-', submittal:'', model:'', date:'', location:'' },
-    checks: { Identity:[null,null,null], Condition:[null,null,null], Documents:[null,null,null] },
+    checks: { Identity:[null,null], Condition:[null,null], Documents:[null] },
     params: [ {name:'', observed:'', result:null} ],
     photos: [[],[],[],[]],
     liro: { name:'', date:'' },
@@ -291,7 +291,7 @@ var CONFIG = {
   var headerDefs = [
     ['project','Project','text',''], ['phase','Phase # – Trade / FMS No.','select',''],
     ['materialId','Material ID','text',''], ['recordId','Verification Record ID','text','V-'],
-    ['submittal','Submittal No.','text',''], ['model','Approved Model No.','text',''],
+    ['submittal','Submittal No. / Shop Drawing','text',''], ['model','Approved Model No.','text',''],
     ['date','Delivery date','date',''], ['location','Install location','text','']
   ];
 
@@ -306,19 +306,15 @@ var CONFIG = {
 
   var groupDefs = {
     Identity: ['Nameplate manufacturer, model and serial match the approved submittal',
-               'Configuration / hand / orientation matches approved drawings',
                'Quantity delivered matches PO and packing slip'],
-    Condition: ['No visible shipping damage',
-                'Shipping protection / wrapping intact on arrival',
+    Condition: ['No visible damage and shipping protection intact on arrival',
                 'Loose-shipped parts inventoried against packing list'],
-    Documents: ['Packing slip / bill of lading / delivery ticket',
-                'Factory test report / certificate of compliance (as specified)',
-                'Installation instructions required before installation']
+    Documents: ['Packing slip / bill of lading / delivery ticket']
   };
 
   var resKinds = { 'Pass':'good', 'Fail':'bad', 'N/A':'na' };
   var pKinds = { 'Match':'good', "Doesn't Match":'bad', 'N/A':'na', 'Other':'na' };
-  var conKinds = { 'Signed':'good', 'Unavailable':'na', 'Declined':'bad' };
+  var conKinds = { 'Signed':'good', 'Unavailable':'na', 'Declined':'bad', 'N/A':'na' };
 
   // Set after the first Submit tap on a half-finished form: highlights the
   // unanswered rows until they're answered or the form is submitted anyway.
@@ -326,7 +322,7 @@ var CONFIG = {
   var incompleteWarned = 0;
   var lastParamAddTime = 0;
   var lastParamRemoveTime = 0;
-  var photoLabels = ['Nameplate photographed','All sides / connections photographed','Packing slip / bill of lading / delivery ticket photographed','Any damage or discrepancy photographed'];
+  var photoLabels = ['Nameplate photographed','Condition of material photographed','Packing slip / bill of lading / delivery ticket photographed','Any damage or discrepancy photographed'];
 
   /* ============ Helpers ============ */
   function el(tag, cls, text) {
@@ -437,11 +433,33 @@ var CONFIG = {
      saveDraft endpoint. Every field below is normalized to the shape the
      renderers assume, so a short/missing/malformed value degrades to a
      sane default instead of throwing mid-render and bricking the app. */
+  /* Drafts saved before the 2026-07-31 checklist trim carry 3 answers per
+     group. Blind truncation would shift answers onto the wrong rows (the
+     old "configuration" answer would land on "quantity") — map each
+     surviving item to its old slot instead. */
+  function migrateLegacyChecks(g, arr) {
+    if (arr.length !== 3) return arr;
+    if (g === 'Identity') return [arr[0], arr[2]];   // old slot 2 (config) dropped
+    if (g === 'Condition') {
+      // Old separate "no damage" + "protection intact" answers fold into the
+      // combined item: either failed -> Fail; both answered -> Pass unless
+      // both N/A; only one answered -> leave blank for a fresh look.
+      var a = arr[0], b = arr[1];
+      var merged = (a === 'Fail' || b === 'Fail') ? 'Fail'
+        : (a && b) ? (a === b ? a : 'Pass')
+        : null;
+      return [merged, arr[2]];
+    }
+    if (g === 'Documents') return [arr[0]];          // old slots 2 & 3 dropped
+    return arr;
+  }
+
   function normalizeChecks(c) {
     var out = {};
     CHECK_GROUP_KEYS.forEach(function (g) {
-      var arr = (c && Array.isArray(c[g])) ? c[g].slice(0, 3) : [];
-      while (arr.length < 3) arr.push(null);
+      var n = groupDefs[g].length;   // per-group count, not a fixed 3
+      var arr = (c && Array.isArray(c[g])) ? migrateLegacyChecks(g, c[g]).slice(0, n) : [];
+      while (arr.length < n) arr.push(null);
       out[g] = arr;
     });
     return out;
@@ -1323,7 +1341,7 @@ var CONFIG = {
   function renderCon() {
     var host = document.getElementById('con-options');
     host.innerHTML = '';
-    ['Signed','Unavailable','Declined'].forEach(function (r) {
+    ['Signed','Unavailable','Declined','N/A'].forEach(function (r) {
       host.appendChild(optButton(r, conKinds[r], state.con.status === r, function () {
         state.con.status = state.con.status === r ? null : r;
         renderCon();
@@ -1422,7 +1440,7 @@ var CONFIG = {
 
   function resetForm() {
     state.header = { project:'', phase:'', materialId:'', recordId:'V-', submittal:'', model:'', date:'', location:'' };
-    state.checks = { Identity:[null,null,null], Condition:[null,null,null], Documents:[null,null,null] };
+    state.checks = { Identity:[null,null], Condition:[null,null], Documents:[null] };
     state.params = [ {name:'', observed:'', result:null} ];
     state.photos = [[],[],[],[]];
     state.liro = { name:'', date:'' };
