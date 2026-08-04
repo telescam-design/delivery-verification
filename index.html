@@ -419,6 +419,12 @@ var CONFIG = {
   var persistTimer = null;
 
   function schedulePersist() {
+    // Content changed — a previously minted submission id no longer
+    // describes this form. Without this, a submit that timed out client-side
+    // but actually landed would make the server swallow the EDITED retry as
+    // a duplicate ("Saved" shown, nothing filed). A no-edit retry keeps its
+    // id and still dedupes.
+    try { localStorage.removeItem(SID_KEY); } catch (e) {}
     clearTimeout(persistTimer);
     persistTimer = setTimeout(saveDraft, 500);
   }
@@ -441,9 +447,28 @@ var CONFIG = {
   // set can blow the ~5MB quota where the text draft never will, and if it
   // does the typed fields still persist (photos just won't survive a reload).
   function savePhotos() {
+    // Photo set changed — same submission-id invalidation as schedulePersist.
+    try { localStorage.removeItem(SID_KEY); } catch (e) {}
     try {
       localStorage.setItem(PHOTO_KEY, JSON.stringify(state.photos));
     } catch (e) {}
+  }
+
+  /* ============ Shared-write token (optional, off by default) ============
+     The backend can be locked so only phones set up with a shared token may
+     write cloud drafts/presets (Script Property WRITE_TOKEN — unset means
+     open, today's behavior). A phone is seeded once by opening the app link
+     with #k=<token>; the fragment never reaches any server or log. */
+  var TOKEN_KEY = 'dv-token';
+  (function () {
+    var m = /(?:^|[#&])k=([^&]+)/.exec(location.hash);
+    if (m) {
+      try { localStorage.setItem(TOKEN_KEY, decodeURIComponent(m[1])); } catch (e) {}
+      try { history.replaceState(null, '', location.pathname + location.search); } catch (e2) {}
+    }
+  })();
+  function writeToken() {
+    try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
   }
 
   var CHECK_GROUP_KEYS = ['Identity', 'Condition', 'Documents'];
@@ -479,6 +504,13 @@ var CONFIG = {
     CHECK_GROUP_KEYS.forEach(function (g) {
       var n = groupDefs[g].length;   // per-group count, not a fixed 3
       var arr = (c && Array.isArray(c[g])) ? migrateLegacyChecks(g, c[g]).slice(0, n) : [];
+      // Whitelist the VALUES too: junk like 'PASS ' or {} from a poisoned or
+      // foreign draft would render as an unanswered row yet count as
+      // "answered" everywhere (truthy), skipping the INCOMPLETE warning and
+      // landing as garbage in the record.
+      arr = arr.map(function (v) {
+        return ['Pass', 'Fail', 'N/A'].indexOf(v) !== -1 ? v : null;
+      });
       while (arr.length < n) arr.push(null);
       out[g] = arr;
     });
@@ -511,12 +543,15 @@ var CONFIG = {
 
   function normalizeParams(arr) {
     if (!Array.isArray(arr) || !arr.length) return [{ name: '', observed: '', result: null }];
-    var mapped = arr.map(function (p) {
+    var mapped = arr.slice(0, 50).map(function (p) {   // same cap the server enforces
       p = (p && typeof p === 'object') ? p : {};
       var observed = p.observed == null ? '' : String(p.observed);
       // Pre-dynamic-parameter drafts had a separate "other" explanation field.
       if (!observed && p.result === 'Other' && p.other) observed = String(p.other);
-      return { name: p.name == null ? '' : String(p.name), observed: observed, result: p.result || null };
+      // Whitelist the result value (see normalizeChecks).
+      var result = ['Match', "Doesn't Match", 'N/A', 'Other'].indexOf(p.result) !== -1
+        ? p.result : null;
+      return { name: p.name == null ? '' : String(p.name), observed: observed, result: result };
     });
     var deduped = dedupeParams(mapped);
     return deduped.length ? deduped : [{ name: '', observed: '', result: null }];
@@ -540,19 +575,32 @@ var CONFIG = {
 
   function applyDraftObject(d, opts) {
     opts = opts || {};
-    if (d.header && typeof d.header === 'object') {
-      Object.keys(d.header).forEach(function (k) {
-        state.header[k] = d.header[k] == null ? '' : String(d.header[k]);
-      });
-    }
+    // Rebuild header/liro/con from blank defaults — never merge. Merging let
+    // fields the draft happened to omit (older app version, partial injected
+    // payload) keep the PREVIOUS delivery's values after "Replace everything
+    // on this screen", bleeding e.g. a model number or a contractor sign-off
+    // into the wrong record. Whitelisted keys only.
+    var hdr = (d.header && typeof d.header === 'object') ? d.header : {};
+    state.header = {};
+    ['project','phase','materialId','recordId','submittal','model','date','location'].forEach(function (k) {
+      state.header[k] = hdr[k] == null ? '' : String(hdr[k]);
+    });
     state.checks = normalizeChecks(d.checks);
     state.params = normalizeParams(d.params);
     // Cloud drafts never legitimately carry photos (cloudDraft() omits them)
     // — a populated photos field there is either a stale client bug or an
     // injected payload, so it's always ignored for that path.
     if (!opts.skipPhotos) state.photos = normalizePhotos(d.photos);
-    if (d.liro && typeof d.liro === 'object') Object.assign(state.liro, d.liro);
-    if (d.con && typeof d.con === 'object') Object.assign(state.con, d.con);
+    var liro = (d.liro && typeof d.liro === 'object') ? d.liro : {};
+    state.liro = {
+      name: liro.name == null ? '' : String(liro.name),
+      date: liro.date == null ? '' : String(liro.date)
+    };
+    var con = (d.con && typeof d.con === 'object') ? d.con : {};
+    state.con = {
+      name: con.name == null ? '' : String(con.name),
+      status: ['Signed','Unavailable','Declined','N/A'].indexOf(con.status) !== -1 ? con.status : null
+    };
   }
 
   function loadDraft() {
@@ -609,14 +657,14 @@ var CONFIG = {
     } catch (e) { fail(); }
   }
 
-  function localDraftId() {
-    var mid = String(state.header.materialId || '').trim();
-    return mid ? 'm:' + mid.toLowerCase() : 't:' + Date.now();
-  }
-
   /* fail(reason) — reason 'full' means the cap was hit for a NEW entry
      (an upsert of an existing one always goes through). */
   function putLocalDraft(entry, done, fail) {
+    // A failed put can fire BOTH onerror and onabort — settle() collapses
+    // that to exactly one callback (a double fail() into sendLocalEntry's
+    // retry path would fork the batch into two concurrent send chains).
+    var settled = false;
+    function settle(fn, arg) { if (settled) return; settled = true; fn(arg); }
     openLocalDb(function (db) {
       try {
         var tx = db.transaction(LOCAL_STORE, 'readwrite');
@@ -634,10 +682,10 @@ var CONFIG = {
           }
           st.put(entry);
         };
-        tx.oncomplete = function () { done(); };
-        tx.onabort = tx.onerror = function () { fail(full ? 'full' : undefined); };
-      } catch (e) { fail(); }
-    }, fail);
+        tx.oncomplete = function () { settle(done); };
+        tx.onabort = tx.onerror = function () { settle(fail, full ? 'full' : undefined); };
+      } catch (e) { settle(fail); }
+    }, function () { settle(fail); });
   }
 
   function readLocalDrafts(done, fail) {
@@ -661,13 +709,15 @@ var CONFIG = {
 
   /* Best-effort delete — done() runs either way so the UI never hangs on it. */
   function deleteLocalDraft(id, done) {
+    var settled = false;
+    function settle() { if (settled) return; settled = true; done(); }
     openLocalDb(function (db) {
       try {
         var tx = db.transaction(LOCAL_STORE, 'readwrite');
         tx.objectStore(LOCAL_STORE).delete(id);
-        tx.oncomplete = tx.onabort = tx.onerror = function () { done(); };
-      } catch (e) { done(); }
-    }, done);
+        tx.oncomplete = tx.onabort = tx.onerror = settle;
+      } catch (e) { settle(); }
+    }, settle);
   }
 
   /* ============ Submit all (batch-send the phone's drafts) ============
@@ -743,6 +793,7 @@ var CONFIG = {
 
   function submitAllLocalDrafts(entries) {
     if (batchRunning) return;
+    if (submitBtn.disabled) return;   // a single submit is mid-flight
     if (!CONFIG.SCRIPT_URL) {
       showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
       return;
@@ -776,13 +827,22 @@ var CONFIG = {
 
     closeDraftPicker();
     batchRunning = true;
-    submitBtn.disabled = true;
+    setSubmitBusy(true);   // Load/Save/Reset stay locked for the whole batch
     var sent = [];
+    var mirroredSent = false;
     var i = 0;
 
     function finish(failedEntry) {
       batchRunning = false;
-      submitBtn.disabled = false;
+      setSubmitBusy(false);
+      // If the live form was loaded from (or saved to) one of the drafts
+      // that just went out, clear it — leaving it on screen would invite a
+      // second, duplicate submission of the same delivery.
+      if (mirroredSent) {
+        clearDraft();
+        loadedLocalDraftId = null;
+        resetForm();
+      }
       if (failedEntry) {
         showStatus('err', 'Sent ' + sent.length + ' of ' + sendable.length + ' — stopped at "' +
           (failedEntry.title || 'draft') + "\". The rest are still on this phone — check signal and tap Submit all again.");
@@ -800,6 +860,7 @@ var CONFIG = {
         (entry.title || '(no Material ID)') + '…');
       sendLocalEntry(entry, function (recordId) {
         sent.push(recordId);
+        if (entry.id === loadedLocalDraftId) mirroredSent = true;
         deleteLocalDraft(entry.id, next);
       }, function () {
         finish(entry);
@@ -879,6 +940,12 @@ var CONFIG = {
     // of this cloud content delete an unrelated local entry.
     loadedLocalDraftId = null;
     applyDraftObject(draft, { skipPhotos: true });
+    // The screen now shows a different delivery — photos taken for the
+    // previous one must not ride along into its record (thumbnails sit below
+    // the fold on a phone, so they'd be submitted unseen). savePhotos() too,
+    // or the old set would resurrect from localStorage on the next reload.
+    state.photos = [[], [], [], []];
+    savePhotos();
     // Wholesale content replacement — any earlier "N items unanswered"
     // warning belonged to the form that's gone now.
     showNeeds = false;
@@ -1279,7 +1346,7 @@ var CONFIG = {
     fetchWithTimeout(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'savePreset', preset: { name: name, params: params, header: profile } })
+      body: JSON.stringify({ action: 'savePreset', token: writeToken(), preset: { name: name, params: params, header: profile } })
     })
       .then(function (res) { return res.json(); })
       .then(function (out) {
@@ -1327,8 +1394,14 @@ var CONFIG = {
       presetLoadBtn.textContent = 'Load preset';
       if (seq !== presetReqSeq) return;   // superseded while in flight
       renderPresetPicker(list, function (p) {
-        if (paramsTouched() &&
-            !window.confirm('Replace the current parameters with preset "' + p.name + '"?')) return;
+        // Confirm when the preset would replace typed parameters OR typed
+        // submittal/model (a profile-carrying preset overwrites those too).
+        var profileClash = !!(p.header &&
+          (String(state.header.submittal || '').trim() || String(state.header.model || '').trim()));
+        if ((paramsTouched() || profileClash) &&
+            !window.confirm('Replace the current parameters' +
+              (profileClash ? ' and the typed Submittal No. / Model' : '') +
+              ' with preset "' + p.name + '"?')) return;
         applyPreset(p);
         closePresetPicker();
       });
@@ -1810,28 +1883,27 @@ var CONFIG = {
     statusMsg.textContent = '';
   }
 
-  function showSaved(recordId) {
+  /* recordId/dup come from the server response; loadedId is the phone-draft
+     key SNAPSHOTTED at Submit-click time — never re-read from live state
+     here, because success can arrive up to 90s later and the form must only
+     ever clean up after the delivery that was actually sent. */
+  function showSaved(recordId, dup, loadedId) {
     var toast = document.getElementById('saved-toast');
     // The assigned V-number is the one thing worth reading off the toast —
     // it's what gets written on the packing slip. Longer display when shown.
+    // "Already saved" = the server deduped a retry: filed once, correctly.
     document.getElementById('saved-toast-text').textContent =
-      recordId ? 'Saved as ' + recordId : 'Saved';
+      recordId ? (dup ? 'Already saved as ' + recordId : 'Saved as ' + recordId) : 'Saved';
     toast.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { toast.classList.remove('show'); }, recordId ? 4000 : 2000);
     saveDefaults();   // remember project / phase / verifier before the reset
     clearDraft();
-    // This delivery is submitted — remove its phone copy so the local list
-    // doesn't collect already-done work. Both possible keys: the Material-ID
-    // slot for the just-submitted form, and whatever entry the form was
-    // loaded from (they differ if the Material ID changed after loading).
-    var mid = String(state.header.materialId || '').trim();
-    var midKey = mid ? 'm:' + mid.toLowerCase() : null;
-    if (midKey) deleteLocalDraft(midKey, function () {});
-    if (loadedLocalDraftId && loadedLocalDraftId !== midKey) {
-      deleteLocalDraft(loadedLocalDraftId, function () {});
-    }
-    loadedLocalDraftId = null;
+    // This delivery is submitted — remove the phone-draft entry the form was
+    // loaded from / saved to (if any), so the local list doesn't collect
+    // already-done work. Only that entry: drafts are per-delivery now.
+    if (loadedId) deleteLocalDraft(loadedId, function () {});
+    if (loadedLocalDraftId === loadedId) loadedLocalDraftId = null;
     closeDraftPicker();
     closePresetPicker();
     resetForm();
@@ -1931,8 +2003,24 @@ var CONFIG = {
     return n;
   }
 
+  /* While a submit is in flight (up to 90s on bad signal), every button that
+     could replace/clear the form or its drafts is locked. Otherwise a late
+     success would clean up after whatever the screen shows NOW — wiping a
+     just-loaded, never-submitted draft (photos included). Typing stays
+     possible; the payload and cleanup keys are snapshotted at click time. */
+  var mutatingButtons = null;
+  function setSubmitBusy(busy) {
+    if (!mutatingButtons) {
+      mutatingButtons = [submitBtn, saveBtn, saveLocalBtn, loadBtn, resetBtn];
+    }
+    mutatingButtons.forEach(function (b) { b.disabled = busy; });
+  }
+
   submitBtn.addEventListener('click', function () {
+    if (batchRunning) return;   // Submit-all owns the pipe right now
     clearStatus();
+    closeDraftPicker();
+    closePresetPicker();
 
     // Validate: Material ID required
     if (!state.header.materialId.trim()) {
@@ -1963,9 +2051,11 @@ var CONFIG = {
       return;
     }
 
-    submitBtn.disabled = true;
+    setSubmitBusy(true);
     submitBtn.textContent = 'Submitting…';
     hintEl.textContent = 'Sending — this can take up to ~30 seconds with photos.';
+    // Snapshot the cleanup key NOW — see showSaved.
+    var subLoadedId = loadedLocalDraftId;
 
     // Everything from here until the fetch actually kicks off runs
     // synchronously (buildPayload, submissionId) — if any of it throws
@@ -1994,7 +2084,7 @@ var CONFIG = {
         .then(function (res) { return res.json(); })
         .then(function (out) {
           if (out.status === 'ok') {
-            showSaved(out.recordId || '');
+            showSaved(out.recordId || '', !!out.duplicate, subLoadedId);
           } else {
             throw new Error(out.message || 'Server rejected the submission.');
           }
@@ -2005,12 +2095,12 @@ var CONFIG = {
         })
         .then(function () {
           clearTimeout(abortTimer);
-          submitBtn.disabled = false;
+          setSubmitBusy(false);
           submitBtn.textContent = 'Submit Verification';
           hintEl.textContent = HINT_IDLE;
         });
     } catch (err) {
-      submitBtn.disabled = false;
+      setSubmitBusy(false);
       submitBtn.textContent = 'Submit Verification';
       hintEl.textContent = HINT_IDLE;
       showStatus('err', "Couldn't save — check signal and tap Submit again.");
@@ -2034,7 +2124,7 @@ var CONFIG = {
     fetchWithTimeout(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'saveDraft', draft: cloudDraft() })
+      body: JSON.stringify({ action: 'saveDraft', token: writeToken(), draft: cloudDraft() })
     })
       .then(function (res) { return res.json(); })
       .then(function (out) {
@@ -2069,7 +2159,13 @@ var CONFIG = {
       saveLocalBtn.textContent = 'Save local draft';
       showStatus(kind, msg);
     };
-    var id = localDraftId();
+    // Every draft is its own entry: re-saving the delivery you loaded (or
+    // already saved this session) updates it in place via loadedLocalDraftId,
+    // but a fresh form ALWAYS gets a new key. Keying by Material ID (the old
+    // scheme) silently overwrote last week's unsubmitted draft when a second
+    // shipment of the same material came in.
+    var id = loadedLocalDraftId ||
+      ('t:' + Date.now() + '-' + Math.random().toString(36).slice(2));
     var photoCount = 0;
     state.photos.forEach(function (s) { photoCount += s.length; });
     var entry = {
