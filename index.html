@@ -131,7 +131,8 @@
   .export-hint{font-size:12px;color:var(--gray-500)}
   .csv-link{background:none;border:none;padding:4px;font-size:12.5px;font-weight:600;color:var(--liro-blue);cursor:pointer;text-decoration:underline}
   .csv-link:hover{color:var(--liro-blue-dark)}
-  .draft-row{display:flex;gap:8px;justify-content:center;width:100%;max-width:420px}
+  .draft-row{display:flex;gap:8px;justify-content:center;width:100%;max-width:420px;flex-wrap:wrap}
+  .draft-row .sbtn{flex:1 1 42%}
   .sbtn{flex:1 1 0;min-height:44px;padding:9px 16px;border-radius:5px;border:1px solid var(--gray-300);background:#fff;color:var(--gray-700);font-size:13px;font-weight:600;cursor:pointer}
   .sbtn:hover{border-color:var(--liro-blue);color:var(--liro-blue)}
   .sbtn:disabled{opacity:.5;cursor:not-allowed}
@@ -144,6 +145,12 @@
   .draft-picker-item .dp-sub{font-size:11.5px;color:var(--gray-500)}
   .draft-picker-cancel{width:100%;min-height:40px;padding:8px;border:none;background:var(--gray-50);color:var(--gray-600);font-size:12.5px;font-weight:600;cursor:pointer;border-top:1px solid var(--gray-200)}
   .draft-picker-cancel:hover{background:var(--gray-100)}
+  .draft-picker-head{font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--gray-500);background:var(--gray-50);padding:7px 14px;border-bottom:1px solid var(--gray-100)}
+  .dp-row{display:flex;align-items:stretch;border-bottom:1px solid var(--gray-100)}
+  .dp-row .draft-picker-item{border-bottom:none;flex:1 1 auto}
+  .dp-del{flex:0 0 44px;border:none;background:#fff;color:var(--gray-400);font-size:18px;cursor:pointer;border-left:1px solid var(--gray-100);padding:0}
+  .dp-del:hover{color:var(--error);background:var(--error-bg)}
+  .dp-note{font-size:12px;color:var(--gray-500);padding:10px 14px;border-bottom:1px solid var(--gray-100)}
   .preset-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
   .preset-row .sbtn{flex:1 1 auto}
   .preset-picker{max-width:none;margin-top:8px}
@@ -244,6 +251,7 @@
     <div class="status" id="status-msg"></div>
     <div class="draft-row">
       <button class="sbtn" id="save-btn" type="button">Save draft</button>
+      <button class="sbtn" id="save-local-btn" type="button">Save local draft</button>
       <button class="sbtn" id="load-btn" type="button">Load draft</button>
       <button class="sbtn" id="reset-btn" type="button">Reset</button>
     </div>
@@ -564,6 +572,98 @@ var CONFIG = {
     } catch (e) {}
   }
 
+  /* ============ Local drafts (multiple, photos included) ============
+     "Save local draft" stows the WHOLE form — photos too — on the phone
+     itself, so several deliveries can be verified back-to-back with no
+     signal and synced/submitted later. Stored in IndexedDB, not
+     localStorage: photo sets are multi-MB and several at once would blow
+     localStorage's ~5MB quota, while IndexedDB comfortably holds hundreds
+     of MB. Upserts by Material ID so re-saving the same delivery never
+     stacks duplicates. */
+  var LOCAL_DB = 'dv-local';
+  var LOCAL_STORE = 'drafts';
+  var LOCAL_DRAFT_MAX = 20;
+  // Set when the on-screen form came from (or was saved to) a phone draft —
+  // a successful Submit deletes that entry so the list doesn't collect
+  // already-submitted deliveries.
+  var loadedLocalDraftId = null;
+
+  function openLocalDb(done, fail) {
+    if (!window.indexedDB) { fail(); return; }
+    try {
+      var req = indexedDB.open(LOCAL_DB, 1);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains(LOCAL_STORE)) {
+          db.createObjectStore(LOCAL_STORE, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = function () { done(req.result); };
+      req.onerror = function () { fail(); };
+    } catch (e) { fail(); }
+  }
+
+  function localDraftId() {
+    var mid = String(state.header.materialId || '').trim();
+    return mid ? 'm:' + mid.toLowerCase() : 't:' + Date.now();
+  }
+
+  /* fail(reason) — reason 'full' means the cap was hit for a NEW entry
+     (an upsert of an existing one always goes through). */
+  function putLocalDraft(entry, done, fail) {
+    openLocalDb(function (db) {
+      try {
+        var tx = db.transaction(LOCAL_STORE, 'readwrite');
+        var st = tx.objectStore(LOCAL_STORE);
+        var full = false;
+        var total = 0;
+        var countReq = st.count();
+        countReq.onsuccess = function () { total = countReq.result; };
+        var getReq = st.get(entry.id);
+        getReq.onsuccess = function () {
+          if (!getReq.result && total >= LOCAL_DRAFT_MAX) {
+            full = true;
+            tx.abort();
+            return;
+          }
+          st.put(entry);
+        };
+        tx.oncomplete = function () { done(); };
+        tx.onabort = tx.onerror = function () { fail(full ? 'full' : undefined); };
+      } catch (e) { fail(); }
+    }, fail);
+  }
+
+  function readLocalDrafts(done, fail) {
+    openLocalDb(function (db) {
+      try {
+        var tx = db.transaction(LOCAL_STORE, 'readonly');
+        var req = tx.objectStore(LOCAL_STORE).getAll();
+        req.onsuccess = function () {
+          var list = (req.result || []).filter(function (e) {
+            return e && e.draft && e.draft.header;
+          });
+          list.sort(function (a, b) {
+            return String(b.savedAt || '').localeCompare(String(a.savedAt || ''));
+          });
+          done(list);
+        };
+        req.onerror = function () { fail(); };
+      } catch (e) { fail(); }
+    }, fail);
+  }
+
+  /* Best-effort delete — done() runs either way so the UI never hangs on it. */
+  function deleteLocalDraft(id, done) {
+    openLocalDb(function (db) {
+      try {
+        var tx = db.transaction(LOCAL_STORE, 'readwrite');
+        tx.objectStore(LOCAL_STORE).delete(id);
+        tx.oncomplete = tx.onabort = tx.onerror = function () { done(); };
+      } catch (e) { done(); }
+    }, done);
+  }
+
   /* ============ Cloud draft (cross-device) ============
      "Save draft" pushes the typed fields to the backend, which keeps ONE
      shared draft in a hidden tab of the Sheet. A device that opens the app
@@ -632,6 +732,9 @@ var CONFIG = {
     // content the user never saw.
     closeDraftPicker();
     closePresetPicker();
+    // The form no longer mirrors a phone draft — don't let a later Submit
+    // of this cloud content delete an unrelated local entry.
+    loadedLocalDraftId = null;
     applyDraftObject(draft, { skipPhotos: true });
     // Wholesale content replacement — any earlier "N items unanswered"
     // warning belonged to the form that's gone now.
@@ -659,27 +762,115 @@ var CONFIG = {
     draftPickerEl.innerHTML = '';
   }
 
-  function renderDraftPicker(list) {
-    draftPickerEl.innerHTML = '';
-    if (!list.length) {
+  /* One picker, two sections: drafts stored on THIS phone (usable with zero
+     signal, photos included) above the shared cloud drafts. Rendered as soon
+     as the phone list is ready; the cloud section fills in (or reports
+     failure) when its fetch settles. */
+  function renderCombinedPicker(view, seq) {
+    var localList = view.local || [];
+    var cloudList = view.cloud || [];
+    if (!localList.length && !view.cloudPending && !view.cloudErr && !cloudList.length) {
       closeDraftPicker();
+      showStatus('err', 'No saved drafts found.');
       return;
     }
-    list.forEach(function (entry) {
-      var lbl = draftLabel(entry.draft);
-      var btn = el('button', 'draft-picker-item');
-      btn.type = 'button';
-      btn.appendChild(el('div', 'dp-title', lbl.title));
-      var subText = (lbl.sub ? lbl.sub + ' — ' : '') + 'saved ' + (fmtDate(entry.savedAt) || 'time unknown');
-      btn.appendChild(el('div', 'dp-sub', subText));
-      btn.addEventListener('click', function () { chooseCloudDraft(entry); });
-      draftPickerEl.appendChild(btn);
-    });
+    draftPickerEl.innerHTML = '';
+
+    if (localList.length) {
+      draftPickerEl.appendChild(el('div', 'draft-picker-head', 'On this phone'));
+      localList.forEach(function (entry) {
+        var row = el('div', 'dp-row');
+        var btn = el('button', 'draft-picker-item');
+        btn.type = 'button';
+        btn.appendChild(el('div', 'dp-title', entry.title || '(no Material ID yet)'));
+        btn.appendChild(el('div', 'dp-sub',
+          (entry.project ? entry.project + ' — ' : '') +
+          'saved ' + (fmtDate(entry.savedAt) || 'time unknown') +
+          (entry.hasPhotos ? ' · photos' : '')));
+        btn.addEventListener('click', function () { chooseLocalDraft(entry); });
+        row.appendChild(btn);
+        var del = el('button', 'dp-del', '×');
+        del.type = 'button';
+        del.setAttribute('aria-label', 'Delete this phone draft');
+        del.addEventListener('click', function () {
+          if (!window.confirm('Delete "' + (entry.title || 'this draft') + '" from this phone?')) return;
+          deleteLocalDraft(entry.id, function () {
+            if (seq !== draftReqSeq) return;
+            view.local = (view.local || []).filter(function (e) { return e.id !== entry.id; });
+            renderCombinedPicker(view, seq);
+          });
+        });
+        row.appendChild(del);
+        draftPickerEl.appendChild(row);
+      });
+    }
+
+    draftPickerEl.appendChild(el('div', 'draft-picker-head', 'Cloud (all devices)'));
+    if (view.cloudPending) {
+      draftPickerEl.appendChild(el('div', 'dp-note', 'Checking the cloud…'));
+    } else if (view.cloudErr) {
+      draftPickerEl.appendChild(el('div', 'dp-note', "Couldn't reach the cloud — drafts on this phone still work."));
+    } else if (!cloudList.length) {
+      draftPickerEl.appendChild(el('div', 'dp-note', 'No cloud drafts.'));
+    } else {
+      cloudList.forEach(function (entry) {
+        var lbl = draftLabel(entry.draft);
+        var btn = el('button', 'draft-picker-item');
+        btn.type = 'button';
+        btn.appendChild(el('div', 'dp-title', lbl.title));
+        var subText = (lbl.sub ? lbl.sub + ' — ' : '') + 'saved ' + (fmtDate(entry.savedAt) || 'time unknown');
+        btn.appendChild(el('div', 'dp-sub', subText));
+        btn.addEventListener('click', function () { chooseCloudDraft(entry); });
+        draftPickerEl.appendChild(btn);
+      });
+    }
+
     var cancel = el('button', 'draft-picker-cancel', 'Cancel');
     cancel.type = 'button';
     cancel.addEventListener('click', closeDraftPicker);
     draftPickerEl.appendChild(cancel);
     draftPickerEl.style.display = 'block';
+  }
+
+  /* The Load button's entry point: read the phone's drafts and fetch the
+     cloud list concurrently, rendering whatever is ready. Everything is
+     seq-guarded so a stale response can't reopen a closed picker. */
+  function openDraftPicker() {
+    var seq = ++draftReqSeq;
+    var view = { local: null, cloud: null, cloudErr: false, cloudPending: true };
+    function rerender() {
+      if (seq !== draftReqSeq) return;
+      renderCombinedPicker(view, seq);
+    }
+    readLocalDrafts(
+      function (list) { view.local = list; rerender(); },
+      function () { view.local = []; rerender(); }
+    );
+    fetchCloudDrafts(
+      function (list) { view.cloudPending = false; view.cloud = list; rerender(); },
+      function () { view.cloudPending = false; view.cloudErr = true; rerender(); }
+    );
+  }
+
+  function chooseLocalDraft(entry) {
+    if (!isPristine()) {
+      var ok = window.confirm('Replace everything on this screen with "' +
+        (entry.title || '(no Material ID yet)') + '"' + fmtSavedAt(entry.savedAt) + '?');
+      if (!ok) return;
+    }
+    closeDraftPicker();
+    closePresetPicker();
+    applyDraftObject(entry.draft);   // photos included — local drafts carry them
+    showNeeds = false;
+    incompleteWarned = 0;
+    defaultedFields = {};
+    applyDefaults();
+    renderAll();
+    setSignoffInputs();
+    schedulePersist();
+    savePhotos();
+    loadedLocalDraftId = entry.id;
+    showStatus('ok', 'Loaded from this phone' + fmtSavedAt(entry.savedAt) + '.');
   }
 
   function chooseCloudDraft(entry) {
@@ -702,45 +893,34 @@ var CONFIG = {
     return (out.draft && out.draft.header) ? [{ draft: out.draft, savedAt: out.savedAt }] : [];
   }
 
-  /* auto=true runs quietly (page load, or returning to the app): it applies
-     the newest draft only over an untouched form, and otherwise just hints
-     that saved drafts exist. The Load button calls with auto=false: it
-     opens the picker so a specific one can be chosen; picking a non-blank
-     form's replacement asks for confirmation right there. */
-  function checkCloudDraft(auto) {
-    if (!CONFIG.SCRIPT_URL) return;
-    if (auto) {
-      var now = Date.now();
-      if (now - lastCloudCheck < 15000) return;
-      lastCloudCheck = now;
-    }
-    // Claim a token for a manual (picker-opening) request so a stale response
-    // that lands after the user moved on is ignored.
-    var seq = auto ? 0 : ++draftReqSeq;
+  function fetchCloudDrafts(done, fail) {
+    if (!CONFIG.SCRIPT_URL) { fail(); return; }
     fetchWithTimeout(CONFIG.SCRIPT_URL + '?draft=1')
       .then(function (res) { return res.json(); })
       .then(function (out) {
         if (out.status !== 'ok') throw new Error();
-        var list = draftListFrom(out);
-        if (!list.length) {
-          if (!auto) showStatus('err', 'No saved drafts found.');
-          return;
-        }
-        if (!auto) {
-          if (seq !== draftReqSeq) return;   // superseded — don't reopen
-          renderDraftPicker(list);
-          return;
-        }
-        if (isPristine()) {
-          applyCloudDraft(list[0].draft, list[0].savedAt);
-        } else if (JSON.stringify(cloudDraft()) !== JSON.stringify(list[0].draft)) {
-          showStatus('ok', (list.length > 1 ? list.length + ' saved drafts' : 'A saved draft') +
-            ' available — tap "Load draft" to choose.');
-        }
+        done(draftListFrom(out));
       })
-      .catch(function () {
-        if (!auto) showStatus('err', "Couldn't reach the cloud — check signal and try again.");
-      });
+      .catch(function () { fail(); });
+  }
+
+  /* The quiet automatic check (page load, returning to the app): applies the
+     newest cloud draft only over an untouched form, otherwise just hints
+     that saved drafts exist. The Load button opens the picker instead
+     (openDraftPicker above). */
+  function checkCloudDraft() {
+    var now = Date.now();
+    if (now - lastCloudCheck < 15000) return;
+    lastCloudCheck = now;
+    fetchCloudDrafts(function (list) {
+      if (!list.length) return;
+      if (isPristine()) {
+        applyCloudDraft(list[0].draft, list[0].savedAt);
+      } else if (JSON.stringify(cloudDraft()) !== JSON.stringify(list[0].draft)) {
+        showStatus('ok', (list.length > 1 ? list.length + ' saved drafts' : 'A saved draft') +
+          ' available — tap "Load draft" to choose.');
+      }
+    }, function () {});
   }
 
   /* ============ Parameter presets ============
@@ -1439,6 +1619,17 @@ var CONFIG = {
     toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 2000);
     saveDefaults();   // remember project / phase / verifier before the reset
     clearDraft();
+    // This delivery is submitted — remove its phone copy so the local list
+    // doesn't collect already-done work. Both possible keys: the Material-ID
+    // slot for the just-submitted form, and whatever entry the form was
+    // loaded from (they differ if the Material ID changed after loading).
+    var mid = String(state.header.materialId || '').trim();
+    var midKey = mid ? 'm:' + mid.toLowerCase() : null;
+    if (midKey) deleteLocalDraft(midKey, function () {});
+    if (loadedLocalDraftId && loadedLocalDraftId !== midKey) {
+      deleteLocalDraft(loadedLocalDraftId, function () {});
+    }
+    loadedLocalDraftId = null;
     closeDraftPicker();
     closePresetPicker();
     resetForm();
@@ -1454,6 +1645,9 @@ var CONFIG = {
     showNeeds = false;
     incompleteWarned = 0;
     defaultedFields = {};
+    // A cleared form no longer mirrors any phone draft (the draft itself is
+    // kept — only Submit or the picker's × deletes one).
+    loadedLocalDraftId = null;
     applyDefaults();
     renderAll();
     setSignoffInputs();
@@ -1654,14 +1848,58 @@ var CONFIG = {
       });
   });
 
-  /* ============ Load draft (explicit cloud pull — opens the picker) ====== */
+  /* ============ Save local draft (this phone only, photos included) ====== */
+  var saveLocalBtn = document.getElementById('save-local-btn');
+
+  saveLocalBtn.addEventListener('click', function () {
+    clearStatus();
+    closeDraftPicker();
+    closePresetPicker();
+    clearTimeout(persistTimer);
+    saveDraft();   // keep the live autosave in step too
+    saveLocalBtn.disabled = true;
+    saveLocalBtn.textContent = 'Saving…';
+    var finish = function (kind, msg) {
+      saveLocalBtn.disabled = false;
+      saveLocalBtn.textContent = 'Save local draft';
+      showStatus(kind, msg);
+    };
+    var id = localDraftId();
+    var photoCount = 0;
+    state.photos.forEach(function (s) { photoCount += s.length; });
+    var entry = {
+      id: id,
+      title: String(state.header.materialId || '').trim(),
+      project: String(state.header.project || '').trim(),
+      savedAt: new Date().toISOString(),
+      hasPhotos: photoCount > 0,
+      // IndexedDB deep-copies on put, so this is a true snapshot — later
+      // edits to the live form don't bleed into the stored draft.
+      draft: {
+        header: state.header, checks: state.checks, params: state.params,
+        photos: state.photos, liro: state.liro, con: state.con
+      }
+    };
+    putLocalDraft(entry, function () {
+      loadedLocalDraftId = id;
+      finish('ok', 'Saved on this phone' +
+        (photoCount ? ' (' + photoCount + (photoCount === 1 ? ' photo' : ' photos') + ' included)' : '') +
+        ' — find it under Load draft. No signal needed.');
+    }, function (reason) {
+      finish('err', reason === 'full'
+        ? 'This phone already holds ' + LOCAL_DRAFT_MAX + ' local drafts — open Load draft and delete some old ones first.'
+        : "Couldn't save on this phone — this browser may be blocking storage (private tab?). Try Save draft with signal instead.");
+    });
+  });
+
+  /* ============ Load draft (phone + cloud — opens the picker) ============ */
   var loadBtn = document.getElementById('load-btn');
 
   loadBtn.addEventListener('click', function () {
     clearStatus();
     closeDraftPicker();   // in case it was already open; re-fetch fresh
     closePresetPicker();
-    checkCloudDraft(false);
+    openDraftPicker();
   });
 
   /* ============ Reset form (two-tap confirm) ============ */
@@ -1692,17 +1930,17 @@ var CONFIG = {
   applyDefaults();
   renderAll();
   setSignoffInputs();
-  checkCloudDraft(true);
+  checkCloudDraft();
 
   // Returning to the app (home-screen resume, tab switch) re-checks quietly,
   // so a draft saved at the desk shows up without a manual refresh.
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') checkCloudDraft(true);
+    if (document.visibilityState === 'visible') checkCloudDraft();
   });
   // Some browsers restore the page from bfcache (e.g. swiping back) without
   // firing visibilitychange — pageshow with persisted:true catches that.
   window.addEventListener('pageshow', function (ev) {
-    if (ev.persisted) checkCloudDraft(true);
+    if (ev.persisted) checkCloudDraft();
   });
 })();
 </script>
