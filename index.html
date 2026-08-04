@@ -151,6 +151,9 @@
   .dp-del{flex:0 0 44px;border:none;background:#fff;color:var(--gray-400);font-size:18px;cursor:pointer;border-left:1px solid var(--gray-100);padding:0}
   .dp-del:hover{color:var(--error);background:var(--error-bg)}
   .dp-note{font-size:12px;color:var(--gray-500);padding:10px 14px;border-bottom:1px solid var(--gray-100)}
+  .dp-submit-all{width:100%;min-height:44px;padding:9px 14px;border:none;background:var(--info-bg);color:var(--liro-blue);font-size:13px;font-weight:700;cursor:pointer;border-bottom:1px solid var(--gray-100)}
+  .dp-submit-all:hover{background:#d3e7f4}
+  .dp-submit-all:disabled{opacity:.5;cursor:not-allowed}
   .preset-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
   .preset-row .sbtn{flex:1 1 auto}
   .preset-picker{max-width:none;margin-top:8px}
@@ -268,7 +271,7 @@
     <circle cx="12" cy="12" r="10"></circle>
     <path d="m9 12 2 2 4-4"></path>
   </svg>
-  Saved
+  <span id="saved-toast-text">Saved</span>
 </div>
 
 <script>
@@ -287,7 +290,10 @@ var CONFIG = {
 
   /* ============ State ============ */
   var state = {
-    header: { project:'', phase:'', materialId:'', recordId:'V-', submittal:'', model:'', date:'', location:'' },
+    // recordId is gone from the form — the server assigns the next V-number
+    // at submit time (shown back as "Saved as V-007"). It survives here only
+    // when a legacy draft carries one, and is then respected on submit.
+    header: { project:'', phase:'', materialId:'', recordId:'', submittal:'', model:'', date:'', location:'' },
     checks: { Identity:[null,null], Condition:[null,null], Documents:[null] },
     params: [ {name:'', observed:'', result:null} ],
     photos: [[],[],[],[]],
@@ -298,7 +304,7 @@ var CONFIG = {
   /* ============ Definitions ============ */
   var headerDefs = [
     ['project','Project','text',''], ['phase','Phase # – Trade / FMS No.','select',''],
-    ['materialId','Material ID','text',''], ['recordId','Verification Record ID','text','V-'],
+    ['materialId','Material ID','text',''],
     ['submittal','Submittal No. / Shop Drawing','text',''], ['model','Approved Model No.','text',''],
     ['date','Delivery date','date',''], ['location','Install location','text','']
   ];
@@ -664,6 +670,144 @@ var CONFIG = {
     }, done);
   }
 
+  /* ============ Submit all (batch-send the phone's drafts) ============
+     Back at the trailer with N verified deliveries stacked up: one tap sends
+     them all, oldest first, each with its own persisted submission id (so a
+     dropped connection mid-batch can never double-file one on retry). Sent
+     entries are deleted as they land; a failure stops cleanly with the rest
+     still on the phone. The live form is never touched. */
+  var batchRunning = false;
+
+  /* Unanswered count for a stored draft, using the same normalizers the
+     live form uses — mirrors unansweredCount() but never touches state. */
+  function draftUnanswered(d) {
+    var n = 0;
+    var checks = normalizeChecks(d.checks);
+    CHECK_GROUP_KEYS.forEach(function (g) {
+      checks[g].forEach(function (v) { if (!v) n++; });
+    });
+    normalizeParams(d.params).forEach(function (p) { if (!p.result) n++; });
+    return n;
+  }
+
+  function sendLocalEntry(entry, ok, fail) {
+    var d = entry.draft || {};
+    var hdr = (d.header && typeof d.header === 'object') ? d.header : {};
+    var snap = {
+      header: {},
+      checks: normalizeChecks(d.checks),
+      params: normalizeParams(d.params),
+      photos: normalizePhotos(d.photos),
+      liro: (d.liro && typeof d.liro === 'object') ? d.liro : { name: '', date: '' },
+      con: (d.con && typeof d.con === 'object') ? d.con : { name: '', status: null }
+    };
+    ['project','phase','materialId','recordId','submittal','model','date','location'].forEach(function (k) {
+      snap.header[k] = hdr[k] == null ? '' : String(hdr[k]);
+    });
+    // One submission id per stored draft, persisted WITH the entry before
+    // sending — same idempotency contract as the live form's dv-sid.
+    if (entry.sid) {
+      send();
+    } else {
+      entry.sid = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'sid-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      // Best effort: if persisting the sid fails, still send — worst case a
+      // crash between send and delete re-sends with a fresh id.
+      putLocalDraft(entry, send, send);
+    }
+    function send() {
+      var payload;
+      try {
+        payload = buildPayloadFrom(snap);
+        payload.submissionId = entry.sid;
+      } catch (e) { fail(); return; }
+      var ctrl = window.AbortController ? new AbortController() : null;
+      var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, SUBMIT_TIMEOUT_MS) : null;
+      fetch(CONFIG.SCRIPT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload),
+        credentials: 'omit',
+        signal: ctrl ? ctrl.signal : undefined
+      })
+        .then(function (res) { return res.json(); })
+        .then(function (out) {
+          clearTimeout(timer);
+          if (out.status === 'ok') ok(String(out.recordId || ''));
+          else fail();
+        })
+        .catch(function () { clearTimeout(timer); fail(); });
+    }
+  }
+
+  function submitAllLocalDrafts(entries) {
+    if (batchRunning) return;
+    if (!CONFIG.SCRIPT_URL) {
+      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
+      return;
+    }
+    var skipped = 0;
+    var sendable = [];
+    entries.forEach(function (entry) {
+      var d = entry.draft || {};
+      var mid = String(((d.header || {}).materialId) || '').trim();
+      if (mid) sendable.push(entry); else skipped++;
+    });
+    if (!sendable.length) {
+      showStatus('err', 'None of the phone drafts have a Material ID yet — open each one, add it, and save again.');
+      return;
+    }
+    // Oldest first so the assigned V-numbers follow delivery order.
+    sendable.sort(function (a, b) {
+      return String(a.savedAt || '').localeCompare(String(b.savedAt || ''));
+    });
+    var incomplete = 0;
+    sendable.forEach(function (entry) {
+      if (draftUnanswered(entry.draft) > 0) incomplete++;
+    });
+    var msg = 'Send ' + sendable.length + ' phone draft' + (sendable.length === 1 ? '' : 's') + ' now?';
+    if (incomplete) {
+      msg += ' ' + incomplete + ' still ' + (incomplete === 1 ? 'has' : 'have') +
+        ' unanswered items and will be recorded as INCOMPLETE.';
+    }
+    if (skipped) msg += ' (' + skipped + ' without a Material ID will be skipped.)';
+    if (!window.confirm(msg)) return;
+
+    closeDraftPicker();
+    batchRunning = true;
+    submitBtn.disabled = true;
+    var sent = [];
+    var i = 0;
+
+    function finish(failedEntry) {
+      batchRunning = false;
+      submitBtn.disabled = false;
+      if (failedEntry) {
+        showStatus('err', 'Sent ' + sent.length + ' of ' + sendable.length + ' — stopped at "' +
+          (failedEntry.title || 'draft') + "\". The rest are still on this phone — check signal and tap Submit all again.");
+      } else {
+        showStatus('ok', 'Sent ' + sent.length + ' phone draft' + (sent.length === 1 ? '' : 's') +
+          (sent.filter(Boolean).length ? ': ' + sent.filter(Boolean).join(', ') : '') +
+          '. All filed in the log.');
+      }
+    }
+
+    function next() {
+      if (i >= sendable.length) { finish(null); return; }
+      var entry = sendable[i++];
+      showStatus('ok', 'Sending ' + i + ' of ' + sendable.length + ' — ' +
+        (entry.title || '(no Material ID)') + '…');
+      sendLocalEntry(entry, function (recordId) {
+        sent.push(recordId);
+        deleteLocalDraft(entry.id, next);
+      }, function () {
+        finish(entry);
+      });
+    }
+    next();
+  }
+
   /* ============ Cloud draft (cross-device) ============
      "Save draft" pushes the typed fields to the backend, which keeps ONE
      shared draft in a hidden tab of the Sheet. A device that opens the app
@@ -682,7 +826,6 @@ var CONFIG = {
   function isPristine() {
     var h = state.header;
     if (h.materialId || h.submittal || h.model || h.location) return false;
-    if (h.recordId && h.recordId !== 'V-') return false;
     if (h.project && !defaultedFields.project) return false;
     if (h.phase && !defaultedFields.phase) return false;
     if (h.date && !defaultedFields.date) return false;
@@ -803,6 +946,13 @@ var CONFIG = {
         row.appendChild(del);
         draftPickerEl.appendChild(row);
       });
+      var subAll = el('button', 'dp-submit-all',
+        'Submit all phone drafts (' + localList.length + ')');
+      subAll.type = 'button';
+      subAll.addEventListener('click', function () {
+        submitAllLocalDrafts(view.local || []);
+      });
+      draftPickerEl.appendChild(subAll);
     }
 
     draftPickerEl.appendChild(el('div', 'draft-picker-head', 'Cloud (all devices)'));
@@ -971,7 +1121,19 @@ var CONFIG = {
             .filter(function (n) { return n; }).slice(0, 50)
         : [];
       if (!params.length) return;
-      out.push({ name: name, params: params });
+      var entry = { name: name, params: params };
+      // Optional material profile: submittal/model the preset also fills.
+      // Whitelisted keys only — same defensive posture as everything else
+      // that can arrive from the endpoint or stale cache.
+      if (p.header && typeof p.header === 'object') {
+        var prof = {};
+        ['submittal', 'model'].forEach(function (k) {
+          var v = String(p.header[k] == null ? '' : p.header[k]).trim();
+          if (v) prof[k] = v.slice(0, 200);
+        });
+        if (prof.submittal || prof.model) entry.header = prof;
+      }
+      out.push(entry);
     });
     return out;
   }
@@ -992,6 +1154,10 @@ var CONFIG = {
       var k = p.name.toLowerCase();
       if (byName[k]) {
         byName[k].params = p.params.slice();
+        // Stored profile replaces (or clears) the default's — the stored
+        // preset is the whole truth for its name.
+        if (p.header) byName[k].header = p.header;
+        else delete byName[k].header;
       } else {
         byName[k] = p;
         out.push(p);
@@ -1038,7 +1204,8 @@ var CONFIG = {
       btn.type = 'button';
       btn.appendChild(el('div', 'dp-title', p.name));
       btn.appendChild(el('div', 'dp-sub',
-        p.params.length + (p.params.length === 1 ? ' parameter' : ' parameters')));
+        p.params.length + (p.params.length === 1 ? ' parameter' : ' parameters') +
+        (p.header ? ' · fills submittal/model' : '')));
       btn.addEventListener('click', function () { onPick(p); });
       presetPickerEl.appendChild(btn);
     });
@@ -1058,6 +1225,15 @@ var CONFIG = {
 
   function applyPreset(p) {
     state.params = p.params.map(function (n) { return { name: n, observed: '', result: null }; });
+    // Material profile: a preset saved with submittal/model fills those
+    // header fields too (that's the point of a recurring-material preset —
+    // the load confirm already covered replacing what's on screen).
+    var filledProfile = false;
+    if (p.header) {
+      if (p.header.submittal) { state.header.submittal = p.header.submittal; filledProfile = true; }
+      if (p.header.model) { state.header.model = p.header.model; filledProfile = true; }
+      if (filledProfile) { renderHeader(); schedulePersist(); }
+    }
     // A fresh parameter set: clear any prior "N unanswered" warning state so
     // the new rows aren't instantly painted as needs-answer and the next
     // Submit re-warns for the new content (mirrors applyCloudDraft).
@@ -1068,12 +1244,24 @@ var CONFIG = {
     if (wasShowing) renderChecks();   // clear check-row highlights too
     schedulePersist();
     showStatus('ok', 'Loaded preset "' + p.name + '" — ' + p.params.length +
-      (p.params.length === 1 ? ' parameter.' : ' parameters.'));
+      (p.params.length === 1 ? ' parameter' : ' parameters') +
+      (filledProfile ? ' + submittal/model filled.' : '.'));
   }
 
   function currentParamNames() {
     return state.params.map(function (p) { return String(p.name || '').trim(); })
       .filter(function (n) { return n; });
+  }
+
+  /** The current form's material profile ({submittal, model}, blanks
+   *  dropped) — what a saved preset carries alongside its parameter names. */
+  function currentPresetHeader() {
+    var prof = {};
+    var sub = String(state.header.submittal || '').trim();
+    var mod = String(state.header.model || '').trim();
+    if (sub) prof.submittal = sub.slice(0, 200);
+    if (mod) prof.model = mod.slice(0, 200);
+    return prof;
   }
 
   function savePresetToCloud(name) {
@@ -1086,23 +1274,33 @@ var CONFIG = {
       showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
       return;
     }
+    var profile = currentPresetHeader();
     showStatus('ok', 'Saving preset "' + name + '"…');
     fetchWithTimeout(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'savePreset', preset: { name: name, params: params } })
+      body: JSON.stringify({ action: 'savePreset', preset: { name: name, params: params, header: profile } })
     })
       .then(function (res) { return res.json(); })
       .then(function (out) {
         if (out.status !== 'ok') throw new Error(out.message || 'rejected');
         // Keep the offline copy in step so the picker is right even before
         // the next successful fetch.
+        var hasProfile = !!(profile.submittal || profile.model);
         var custom = cachedCustomPresets();
         var found = false;
         custom.forEach(function (p) {
-          if (p.name.toLowerCase() === name.toLowerCase()) { p.params = params.slice(); found = true; }
+          if (p.name.toLowerCase() === name.toLowerCase()) {
+            p.params = params.slice();
+            if (hasProfile) p.header = profile; else delete p.header;
+            found = true;
+          }
         });
-        if (!found) custom.push({ name: name, params: params.slice() });
+        if (!found) {
+          var fresh = { name: name, params: params.slice() };
+          if (hasProfile) fresh.header = profile;
+          custom.push(fresh);
+        }
         cacheCustomPresets(custom);
         showStatus('ok', 'Preset "' + name + '" saved — it\'s now available on every device.');
       })
@@ -1562,7 +1760,7 @@ var CONFIG = {
     var rows = [['Section','Item','Result','Value / Notes']];
     var h = s.header;
     rows.push(['Header','Project','',h.project],['Header','Phase # - Trade / FMS No.','',h.phase],
-      ['Header','Material ID','',h.materialId],['Header','Verification Record ID','',h.recordId],
+      ['Header','Material ID','',h.materialId],
       ['Header','Submittal No.','',h.submittal],['Header','Approved Model No.','',h.model],
       ['Header','Delivery date','',h.date],['Header','Install location','',h.location]);
     Object.keys(groupDefs).forEach(function (g) {
@@ -1612,11 +1810,15 @@ var CONFIG = {
     statusMsg.textContent = '';
   }
 
-  function showSaved() {
+  function showSaved(recordId) {
     var toast = document.getElementById('saved-toast');
+    // The assigned V-number is the one thing worth reading off the toast —
+    // it's what gets written on the packing slip. Longer display when shown.
+    document.getElementById('saved-toast-text').textContent =
+      recordId ? 'Saved as ' + recordId : 'Saved';
     toast.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 2000);
+    toastTimer = setTimeout(function () { toast.classList.remove('show'); }, recordId ? 4000 : 2000);
     saveDefaults();   // remember project / phase / verifier before the reset
     clearDraft();
     // This delivery is submitted — remove its phone copy so the local list
@@ -1636,7 +1838,7 @@ var CONFIG = {
   }
 
   function resetForm() {
-    state.header = { project:'', phase:'', materialId:'', recordId:'V-', submittal:'', model:'', date:'', location:'' };
+    state.header = { project:'', phase:'', materialId:'', recordId:'', submittal:'', model:'', date:'', location:'' };
     state.checks = { Identity:[null,null], Condition:[null,null], Documents:[null] };
     state.params = [ {name:'', observed:'', result:null} ];
     state.photos = [[],[],[],[]];
@@ -1655,8 +1857,11 @@ var CONFIG = {
     window.scrollTo({ top: 0 });
   }
 
-  function buildPayload() {
-    var s = state;
+  function buildPayload() { return buildPayloadFrom(state); }
+
+  /* Builds the submit payload from any state-shaped object — the live form
+     (single Submit) or a normalized phone-draft snapshot (Submit all). */
+  function buildPayloadFrom(s) {
     // Defensive coercion: a draft from a different app version (or a
     // malformed one that slipped past normalization) must never throw here
     // — a throw after the Submit button is already disabled leaves it stuck
@@ -1789,7 +1994,7 @@ var CONFIG = {
         .then(function (res) { return res.json(); })
         .then(function (out) {
           if (out.status === 'ok') {
-            showSaved();
+            showSaved(out.recordId || '');
           } else {
             throw new Error(out.message || 'Server rejected the submission.');
           }
