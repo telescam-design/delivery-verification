@@ -381,7 +381,7 @@ var CONFIG = {
     // recordId is gone from the form — the server assigns the next V-number
     // at submit time (shown back as "Saved as V-007"). It survives here only
     // when a legacy draft carries one, and is then respected on submit.
-    header: { project:'', phase:'', materialId:'', recordId:'', submittal:'', model:'', date:'', location:'' },
+    header: { project:'', phase:'', materialId:'', recordId:'', submittal:'', model:'', date:'', location:'', quantity:'' },
     checks: { Identity:[null,null], Condition:[null,null], Documents:[null] },
     params: [ {name:'', observed:'', result:null} ],
     photos: [[],[],[],[]],
@@ -397,7 +397,8 @@ var CONFIG = {
     ['project','Project','text',''], ['phase','Phase # – Trade / FMS No.','select',''],
     ['materialId','Material ID','text',''],
     ['submittal','Submittal No. / Shop Drawing','text',''], ['model','Approved Model No.','text',''],
-    ['date','Delivery date','date',''], ['location','Install location','text','']
+    ['date','Delivery date','date',''], ['location','Install location','text',''],
+    ['quantity','Quantity','text','e.g. 18']
   ];
 
   var PHASE_OPTIONS = [
@@ -673,7 +674,7 @@ var CONFIG = {
     // into the wrong record. Whitelisted keys only.
     var hdr = (d.header && typeof d.header === 'object') ? d.header : {};
     state.header = {};
-    ['project','phase','materialId','recordId','submittal','model','date','location'].forEach(function (k) {
+    ['project','phase','materialId','recordId','submittal','model','date','location','quantity'].forEach(function (k) {
       state.header[k] = hdr[k] == null ? '' : String(hdr[k]);
     });
     state.checks = normalizeChecks(d.checks);
@@ -845,7 +846,7 @@ var CONFIG = {
       con: (d.con && typeof d.con === 'object') ? d.con : { name: '', status: null },
       overall: OVERALL_VALUES.indexOf(d.overall) !== -1 ? d.overall : null
     };
-    ['project','phase','materialId','recordId','submittal','model','date','location'].forEach(function (k) {
+    ['project','phase','materialId','recordId','submittal','model','date','location','quantity'].forEach(function (k) {
       snap.header[k] = hdr[k] == null ? '' : String(hdr[k]);
     });
     // One submission id per stored draft, persisted WITH the entry before
@@ -1256,6 +1257,14 @@ var CONFIG = {
      Submitting a verification removes its Material ID from Ready to check
      automatically, server-side. */
   var MATERIALS_CACHE_KEY = 'dv-materials';
+  // Section keys in state.photos index order — must match the server's
+  // PHOTO_SECTIONS and buildPayloadFrom's photos mapping.
+  var PHOTO_SECTION_KEYS = ['nameplate', 'sides', 'packingSlip', 'damage'];
+  function stagedPhotoTotal(entry) {
+    var n = 0;
+    PHOTO_SECTION_KEYS.forEach(function (k) { n += (entry.photoCounts && entry.photoCounts[k]) || 0; });
+    return n;
+  }
   // The Material ID this device claimed by opening it from the board, or
   // null. Cleared by Submit success / Reset / loading anything else.
   var loadedMaterialId = null;
@@ -1277,12 +1286,19 @@ var CONFIG = {
       var m = (e.material && typeof e.material === 'object') ? e.material : null;
       if (!m || !m.header || typeof m.header !== 'object') return;
       if (!String(m.header.materialId == null ? '' : m.header.materialId).trim()) return;
+      var counts = {};
+      var rawCounts = (e.photoCounts && typeof e.photoCounts === 'object') ? e.photoCounts : {};
+      PHOTO_SECTION_KEYS.forEach(function (k) {
+        var n = Number(rawCounts[k]);
+        counts[k] = (isFinite(n) && n > 0) ? Math.min(Math.floor(n), 30) : 0;
+      });
       out.push({
         material: m,
         stagedAt: String(e.stagedAt || ''),
         stagedBy: String(e.stagedBy || ''),
         claimedBy: String(e.claimedBy || ''),
-        claimedAt: String(e.claimedAt || '')
+        claimedAt: String(e.claimedAt || ''),
+        photoCounts: counts
       });
     });
     return out;
@@ -1350,7 +1366,7 @@ var CONFIG = {
 
   /* One shared POST helper for the three board actions. The token rides
      along like saveDraft/savePreset — the same WRITE_TOKEN gate applies. */
-  function postMaterialAction(body, done, fail) {
+  function postMaterialAction(body, done, fail, timeoutMs) {
     done = done || function () {};
     fail = fail || function () {};
     if (!CONFIG.SCRIPT_URL) { fail(); return; }
@@ -1360,7 +1376,7 @@ var CONFIG = {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload)
-    })
+    }, timeoutMs)
       .then(function (res) { return res.json(); })
       .then(function (out) {
         if (out.status !== 'ok') throw new Error(out.message || 'rejected');
@@ -1416,6 +1432,8 @@ var CONFIG = {
       if (proj) bits.push(proj);
       bits.push('staged ' + (fmtDate(entry.stagedAt) || 'time unknown') +
         (entry.stagedBy ? ' by ' + entry.stagedBy : ''));
+      var nPhotos = stagedPhotoTotal(entry);
+      if (nPhotos) bits.push(nPhotos + (nPhotos === 1 ? ' photo' : ' photos'));
       if (entry.claimedBy && entry.claimedAt) bits.push('in progress since ' + fmtDate(entry.claimedAt));
       btn.appendChild(el('div', 'dp-sub', bits.join(' — ')));
       btn.addEventListener('click', function () { chooseMaterial(entry); });
@@ -1469,7 +1487,10 @@ var CONFIG = {
         view.note ? "Couldn't load the submitted list." : 'No submitted verifications yet.'));
     }
     recs.forEach(function (r) {
-      var box = el('div', 'dp-static');
+      // Tappable: reopens the filed record for editing — resubmitting
+      // UPDATES the same row / V-number and files into the same folder.
+      var box = el('button', 'draft-picker-item');
+      box.type = 'button';
       var title = el('div', 'dp-title', (r.recordId ? r.recordId + ' · ' : '') + r.materialId);
       if (r.overall) {
         title.appendChild(el('span', 'mat-res ' +
@@ -1481,6 +1502,7 @@ var CONFIG = {
       if (r.timestamp) rbits.push(fmtDate(r.timestamp));
       if (r.verifier) rbits.push(r.verifier);
       box.appendChild(el('div', 'dp-sub', rbits.join(' — ')));
+      box.addEventListener('click', function () { chooseRecord(r); });
       materialsPickerEl.appendChild(box);
     });
 
@@ -1510,6 +1532,42 @@ var CONFIG = {
     });
   }
 
+  /* Tap a submitted verification: pull its typed fields back into the form
+     to fix/finish it. The restored header carries the V-number, so Submit
+     UPDATES that record's row and files new photos + a new PDF into its
+     existing folder (the original PDF stays there as history). */
+  function chooseRecord(r) {
+    if (!r.recordId) {
+      showStatus('err', 'This record has no V-number — open the Sheet to edit it.');
+      return;
+    }
+    var label = r.recordId + (r.materialId ? ' (' + r.materialId + ')' : '');
+    if (!window.confirm('Edit already-filed ' + label + '? Submitting again will UPDATE ' +
+        'that record and file into its folder' +
+        (isPristine() ? '.' : ' — and everything on this screen is replaced.'))) return;
+    showStatus('ok', 'Loading ' + r.recordId + '…');
+    fetchWithTimeout(CONFIG.SCRIPT_URL + '?recordData=' + encodeURIComponent(r.recordId))
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status !== 'ok') throw new Error();
+        if (!out.record || !out.record.header) {
+          // gone:true, or an old (pre-update) server answering the health
+          // check — either way there's nothing to restore.
+          showStatus('err', out.gone
+            ? 'No stored form data for ' + r.recordId + ' — it predates in-app editing. Open the Sheet/PDF instead.'
+            : 'The backend script is out of date — paste the new apps_script.gs and Deploy → New version.');
+          return;
+        }
+        applyCloudDraft(out.record, out.savedAt);
+        closeMaterialsPicker();
+        showStatus('ok', 'Editing ' + r.recordId + ' — Submit updates the same record; new photos ' +
+          'add to its folder (already-filed photos are safe in Drive).');
+      })
+      .catch(function () {
+        showStatus('err', "Couldn't reach the cloud — check signal and tap " + r.recordId + ' again.');
+      });
+  }
+
   function chooseMaterial(entry) {
     var mid = String(entry.material.header.materialId).trim();
     if (!isPristine()) {
@@ -1527,6 +1585,58 @@ var CONFIG = {
     });
     showStatus('ok', 'Loaded "' + mid + '" from the materials list — it\'s tagged ' +
       'In progress for everyone until it\'s submitted.');
+    pullStagedPhotos(entry, mid);
+  }
+
+  /* Staged photos sync down one at a time (bounded memory, visible
+     progress). The target array reference is pinned exactly like the
+     compression loop: if Reset/Submit/another load replaces state.photos
+     mid-pull, remaining photos are quietly dropped instead of landing on
+     whatever the next form becomes. */
+  function pullStagedPhotos(entry, mid) {
+    var jobs = [];
+    PHOTO_SECTION_KEYS.forEach(function (k, si) {
+      var n = (entry.photoCounts && entry.photoCounts[k]) || 0;
+      for (var i = 0; i < n; i++) jobs.push({ sec: k, si: si, i: i });
+    });
+    if (!jobs.length) return;
+    var total = jobs.length;
+    var done = 0;
+    var failed = 0;
+    var target = state.photos;   // applyCloudDraft just replaced it — pin it
+    showStatus('ok', 'Loaded "' + mid + '" — syncing ' + total +
+      (total === 1 ? ' photo' : ' photos') + ' down…');
+    function next() {
+      if (state.photos !== target) return;   // form replaced mid-pull
+      var j = jobs.shift();
+      if (!j) {
+        showStatus(failed ? 'err' : 'ok', failed
+          ? (total - failed) + ' of ' + total + ' staged photos synced — check signal, then reopen "' +
+            mid + '" from the materials list to retry the rest.'
+          : 'Loaded "' + mid + '" with ' + total + (total === 1 ? ' photo' : ' photos') +
+            ' — tagged In progress for everyone until it\'s submitted.');
+        return;
+      }
+      fetchWithTimeout(CONFIG.SCRIPT_URL + '?stagedPhoto=1&materialId=' + encodeURIComponent(mid) +
+          '&sec=' + j.sec + '&i=' + j.i, null, 30000)
+        .then(function (res) { return res.json(); })
+        .then(function (out) {
+          if (out.status === 'ok' && out.data) {
+            if (state.photos === target) {
+              target[j.si].push('data:image/jpeg;base64,' + out.data);
+              renderPhotos();
+              savePhotos();
+            }
+          } else {
+            failed++;   // gone (re-staged/deleted meanwhile) — skip, don't hang
+          }
+          done++;
+          if (jobs.length) showStatus('ok', 'Syncing photos… ' + done + '/' + total);
+          next();
+        })
+        .catch(function () { failed++; done++; next(); });
+    }
+    next();
   }
 
   /* "Add to materials" — the hard save. Typed fields only, upserts by
@@ -1550,11 +1660,22 @@ var CONFIG = {
       return;
     }
     stageBtn.disabled = true;
-    stageBtn.textContent = 'Adding…';
+    var stagePhotoCount = 0;
+    state.photos.forEach(function (s) { stagePhotoCount += s.length; });
+    stageBtn.textContent = stagePhotoCount ? 'Adding… (' + stagePhotoCount + ' photos)' : 'Adding…';
     var stagedBy = String(state.liro.name || '').trim();
+    // Photos travel too (same base64 shape as a submission) — the server
+    // files them in Drive so any device can pull the full set back down.
+    var b64 = function (arr) { return (arr || []).map(function (d) { return String(d).split(',')[1]; }); };
+    var stageCounts = {};
+    PHOTO_SECTION_KEYS.forEach(function (k, si) { stageCounts[k] = state.photos[si].length; });
     postMaterialAction({
       action: 'saveMaterial',
       material: cloudDraft(),
+      photos: {
+        nameplate: b64(state.photos[0]), sides: b64(state.photos[1]),
+        packingSlip: b64(state.photos[2]), damage: b64(state.photos[3])
+      },
       stagedBy: stagedBy
     }, function () {
       stageBtn.disabled = false;
@@ -1565,11 +1686,13 @@ var CONFIG = {
       var board = cachedMaterialsBoard();
       board.materials.unshift({
         material: cloudDraft(), stagedAt: new Date().toISOString(),
-        stagedBy: stagedBy, claimedBy: '', claimedAt: ''
+        stagedBy: stagedBy, claimedBy: '', claimedAt: '',
+        photoCounts: stageCounts
       });
       cacheMaterialsBoard(board);
-      showStatus('ok', '"' + mid + '" is on the shared materials list — any device can open it ' +
-        'under "Materials list". (Staging the same Material ID again updates it.)');
+      showStatus('ok', '"' + mid + '" is on the shared materials list' +
+        (stagePhotoCount ? ' with ' + stagePhotoCount + (stagePhotoCount === 1 ? ' photo' : ' photos') : '') +
+        ' — any device can open it under "Materials list". (Staging the same Material ID again updates it.)');
     }, function (err) {
       stageBtn.disabled = false;
       stageBtn.textContent = 'Add to materials';
@@ -1584,7 +1707,7 @@ var CONFIG = {
       showStatus('err', (err && err.message && err.message !== 'rejected')
         ? err.message
         : "Couldn't reach the cloud — check signal and tap Add to materials again. Nothing was lost.");
-    });
+    }, SUBMIT_TIMEOUT_MS);   // photo upload can far outlast the 15s default
   });
 
   materialsBtn.addEventListener('click', function () {
@@ -2150,17 +2273,17 @@ var CONFIG = {
       });
       box.appendChild(opts);
 
-      // Observed value is only written when Other is selected — Match /
-      // Doesn't Match / N/A are tap-only, nothing to type.
-      if (p.result === 'Other') {
-        var obs = document.createElement('input');
-        obs.type = 'text';
-        obs.className = 'observed';
-        obs.placeholder = 'Observed value / explanation';
-        obs.value = p.observed || '';
-        obs.addEventListener('input', function () { p.observed = obs.value; schedulePersist(); });
-        box.appendChild(obs);
-      }
+      // Observed value is always available — measurements like Length or
+      // Quantity get recorded here with ANY result, instead of being forced
+      // through "Other" just to unlock the box (the real-world pattern that
+      // prompted this: Length → Other "50 ft").
+      var obs = document.createElement('input');
+      obs.type = 'text';
+      obs.className = 'observed';
+      obs.placeholder = 'Observed value / notes (optional)';
+      obs.value = p.observed || '';
+      obs.addEventListener('input', function () { p.observed = obs.value; schedulePersist(); });
+      box.appendChild(obs);
       host.appendChild(box);
     });
 
@@ -2186,6 +2309,61 @@ var CONFIG = {
   }
 
   /* ============ Photos ============ */
+  /* One add tile + its hidden file input. useCamera=true opens the camera
+     directly (capture attr); false opens the photo library (multi-select). */
+  function buildPhotoTile(i, useCamera) {
+    var wrap = el('span');
+    var inputId = (useCamera ? 'photo-cam-' : 'photo-lib-') + i;
+    var add = el('label', 'add-photo');
+    add.htmlFor = inputId;
+    var plus = el('span', 'plus');
+    plus.innerHTML = useCamera
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>';
+    add.appendChild(plus);
+    add.appendChild(el('span', null, useCamera ? 'Take photo' : 'Library'));
+    wrap.appendChild(add);
+
+    var file = document.createElement('input');
+    file.id = inputId;
+    file.type = 'file';
+    file.accept = 'image/*';
+    if (useCamera) file.setAttribute('capture', 'environment');
+    file.multiple = true;
+    file.style.display = 'none';
+    file.addEventListener('change', function () {
+      var files = Array.prototype.slice.call(file.files || []);
+      file.value = '';
+      // Pin the array reference this batch belongs to. If Reset/Submit
+      // replaces state.photos while a compression is still in flight, this
+      // batch keeps writing to the OLD (now-detached) array instead of
+      // silently attaching a late photo to whatever the next form becomes.
+      // Compressing one file at a time (not all at once) also bounds peak
+      // memory — decoding several full camera photos simultaneously is a
+      // real crash risk on older phones.
+      var target = state.photos[i];
+      var idx = 0;
+      function next() {
+        if (idx >= files.length) return;
+        var f = files[idx++];
+        compressImage(f, photoCompress[i].edge, photoCompress[i].q, function (dataUrl) {
+          if (state.photos[i] === target) {
+            target.push(dataUrl);
+            renderPhotos();
+            savePhotos();
+          }
+          next();
+        }, function () {
+          if (state.photos[i] === target) showStatus('err', "Couldn't read one of the photos — try again.");
+          next();
+        });
+      }
+      next();
+    });
+    wrap.appendChild(file);
+    return wrap;
+  }
+
   function renderPhotos() {
     var host = document.getElementById('photos');
     host.innerHTML = '';
@@ -2211,52 +2389,13 @@ var CONFIG = {
         row.appendChild(t);
       });
 
-      var inputId = 'photo-file-' + i;
-      var add = el('label', 'add-photo');
-      add.htmlFor = inputId;
-      var plus = el('span', 'plus');
-      plus.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>';
-      add.appendChild(plus);
-      add.appendChild(el('span', null, 'Add photo'));
-      row.appendChild(add);
-
-      var file = document.createElement('input');
-      file.id = inputId;
-      file.type = 'file';
-      file.accept = 'image/*';
-      file.setAttribute('capture', 'environment');
-      file.multiple = true;
-      file.style.display = 'none';
-      file.addEventListener('change', function () {
-        var files = Array.prototype.slice.call(file.files || []);
-        file.value = '';
-        // Pin the array reference this batch belongs to. If Reset/Submit
-        // replaces state.photos while a compression is still in flight, this
-        // batch keeps writing to the OLD (now-detached) array instead of
-        // silently attaching a late photo to whatever the next form becomes.
-        // Compressing one file at a time (not all at once) also bounds peak
-        // memory — decoding several full camera photos simultaneously is a
-        // real crash risk on older phones.
-        var target = state.photos[i];
-        var idx = 0;
-        function next() {
-          if (idx >= files.length) return;
-          var f = files[idx++];
-          compressImage(f, photoCompress[i].edge, photoCompress[i].q, function (dataUrl) {
-            if (state.photos[i] === target) {
-              target.push(dataUrl);
-              renderPhotos();
-              savePhotos();
-            }
-            next();
-          }, function () {
-            if (state.photos[i] === target) showStatus('err', "Couldn't read one of the photos — try again.");
-            next();
-          });
-        }
-        next();
-      });
-      row.appendChild(file);
+      // Two ways in: "Take photo" opens the camera directly (capture attr,
+      // as before); "Library" opens the phone's photo gallery — for photos
+      // already taken with the native camera app, which is also the way to
+      // have every field photo safe in the camera roll (a web app cannot
+      // write to the camera roll itself).
+      row.appendChild(buildPhotoTile(i, true));
+      row.appendChild(buildPhotoTile(i, false));
 
       box.appendChild(row);
       host.appendChild(box);
@@ -2319,7 +2458,8 @@ var CONFIG = {
     rows.push(['Header','Project','',h.project],['Header','Phase # - Trade / FMS No.','',h.phase],
       ['Header','Material ID','',h.materialId],
       ['Header','Submittal No.','',h.submittal],['Header','Approved Model No.','',h.model],
-      ['Header','Delivery date','',h.date],['Header','Install location','',h.location]);
+      ['Header','Delivery date','',h.date],['Header','Install location','',h.location],
+      ['Header','Quantity','',h.quantity]);
     Object.keys(groupDefs).forEach(function (g) {
       groupDefs[g].forEach(function (label, i) {
         rows.push([g, label, s.checks[g][i] || '', '']);
@@ -2329,7 +2469,7 @@ var CONFIG = {
     // the live in-memory list somehow already has an exact-duplicate row.
     dedupeParams(s.params).forEach(function (p, i) {
       rows.push(['Parameters', (p.name && p.name.trim()) || ('Parameter ' + (i + 1)),
-        p.result || '', p.result === 'Other' ? p.observed : '']);
+        p.result || '', p.observed || '']);
     });
     photoLabels.forEach(function (label, i) {
       rows.push(['Photos', label, '', s.photos[i].length + ' photo(s) attached']);
@@ -2403,7 +2543,7 @@ var CONFIG = {
   }
 
   function resetForm() {
-    state.header = { project:'', phase:'', materialId:'', recordId:'', submittal:'', model:'', date:'', location:'' };
+    state.header = { project:'', phase:'', materialId:'', recordId:'', submittal:'', model:'', date:'', location:'', quantity:'' };
     state.checks = { Identity:[null,null], Condition:[null,null], Documents:[null] };
     state.params = [ {name:'', observed:'', result:null} ];
     state.photos = [[],[],[],[]];
@@ -2447,17 +2587,19 @@ var CONFIG = {
         submittal: str(s.header.submittal),
         model: str(s.header.model),
         date: s.header.date || '',
-        location: str(s.header.location)
+        location: str(s.header.location),
+        quantity: str(s.header.quantity)
       },
       checks: s.checks,
       // Defensive: guarantee the submitted record is never duplicated even
       // if the live in-memory list somehow already has an exact-duplicate
       // row (e.g. a double-tap on "+ Add parameter" before this fix landed).
       params: dedupeParams(s.params).map(function (p) {
-        // observed only travels with Other — the tap-only results send no text
+        // observed travels with EVERY result — any parameter can carry a
+        // recorded value/note now, not just Other.
         return {
           name: str(p.name),
-          observed: p.result === 'Other' ? str(p.observed) : '',
+          observed: str(p.observed),
           result: p.result || null
         };
       }),
