@@ -428,6 +428,10 @@ var CONFIG = {
   ];
 
   var PHASE_OPTIONS = [
+    'Phase 1 - Facilities Service Building',
+    'Phase 2 - Site Utilities',
+    'Phase 2 - Generators',
+    'Phase 3 - Ammo Storage Building',
     'Phase 4 - Core & Shell',
     'Phase 4 - Plumbing&FP',
     'Phase 4 - Electrical',
@@ -607,11 +611,27 @@ var CONFIG = {
     }
   }
 
+  var photoWriteTimer = null;
+
   function savePhotos() {
     // Photo set changed — same submission-id invalidation as schedulePersist.
     try { localStorage.removeItem(SID_KEY); } catch (e) {}
     photoSaveState = 'saving';
     updatePhotoStatus();
+    // Coalesce bursts: a multi-select Library add and the staged-photo sync
+    // both call this once PER PHOTO, and each write serializes the WHOLE
+    // multi-MB array — a 10-photo add used to mean 10 full-array writes.
+    // One debounced write of the final array does the same job. The status
+    // line sits on "Saving…" until the real write lands, so the ✓ is never
+    // shown early, and pagehide/hidden flush the tail (below) so closing
+    // the app right after a photo can't outrun the timer.
+    clearTimeout(photoWriteTimer);
+    photoWriteTimer = setTimeout(flushPhotoWrite, 400);
+  }
+
+  function flushPhotoWrite() {
+    clearTimeout(photoWriteTimer);
+    photoWriteTimer = null;
     vaultPut('photos', state.photos, function () {
       photoSaveState = 'ok';
       // The vault copy is now the truth — drop the legacy localStorage copy
@@ -629,6 +649,17 @@ var CONFIG = {
       if (!ok) showStatus('err', "Couldn't save the photos on this phone — free up storage, and don't close this page until they're submitted.");
     });
   }
+
+  // Leaving the page (home button, tab switch, close) with a write still
+  // debounced: start it NOW. IndexedDB writes begun here usually complete
+  // even as the page goes away — and this is no worse than the old
+  // per-photo async writes, which could also be in flight at close.
+  window.addEventListener('pagehide', function () {
+    if (photoWriteTimer) flushPhotoWrite();
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden' && photoWriteTimer) flushPhotoWrite();
+  });
 
   /* ============ Shared-write token (optional, off by default) ============
      The backend can be locked so only phones set up with a shared token may
@@ -983,6 +1014,10 @@ var CONFIG = {
       localStorage.removeItem(PHOTO_KEY);
       localStorage.removeItem(SID_KEY);
     } catch (e) {}
+    // A debounced photo write racing this delete would just re-write the
+    // (about-to-be-reset) set after the vault key is gone — cancel it.
+    clearTimeout(photoWriteTimer);
+    photoWriteTimer = null;
     vaultDel('photos');
   }
 
@@ -1093,19 +1128,60 @@ var CONFIG = {
     }, function () { settle(fail); });
   }
 
+  /* The picker (and Submit all's confirm) needs only each entry's metadata —
+     never the multi-MB photo payloads. getAll() materialized EVERY draft,
+     photos included (20 drafts × a few MB each, held for as long as the
+     picker stayed open). openCursor walks the store one record at a time,
+     so peak memory is ONE draft, and only the light rows are retained; the
+     full draft is re-read by id at choose/send time (getLocalDraft). */
   function readLocalDrafts(done, fail) {
     openLocalDb(function (db) {
       try {
         var tx = db.transaction(LOCAL_STORE, 'readonly');
-        var req = tx.objectStore(LOCAL_STORE).getAll();
+        var req = tx.objectStore(LOCAL_STORE).openCursor();
+        var list = [];
         req.onsuccess = function () {
-          var list = (req.result || []).filter(function (e) {
-            return e && e.draft && e.draft.header;
-          });
-          list.sort(function (a, b) {
-            return String(b.savedAt || '').localeCompare(String(a.savedAt || ''));
-          });
-          done(list);
+          var cur = req.result;
+          if (!cur) {
+            list.sort(function (a, b) {
+              return String(b.savedAt || '').localeCompare(String(a.savedAt || ''));
+            });
+            done(list);
+            return;
+          }
+          var e = cur.value;
+          if (e && e.draft && e.draft.header) {
+            var anyPhoto = false;
+            (Array.isArray(e.draft.photos) ? e.draft.photos : []).forEach(function (s) {
+              if (Array.isArray(s) && s.length) anyPhoto = true;
+            });
+            list.push({
+              id: e.id,
+              title: String(e.title || e.draft.header.materialId || '').trim(),
+              project: String(e.project || ''),
+              savedAt: e.savedAt || '',
+              hasPhotos: ('hasPhotos' in e) ? !!e.hasPhotos : anyPhoto,
+              // Computed here, while the record is briefly in hand, for the
+              // "N will be recorded as INCOMPLETE" confirm in Submit all.
+              unanswered: draftUnanswered(e.draft)
+            });
+          }
+          cur.continue();
+        };
+        req.onerror = function () { fail(); };
+      } catch (e) { fail(); }
+    }, fail);
+  }
+
+  /** One full stored draft by id — the heavyweight read the light list defers. */
+  function getLocalDraft(id, done, fail) {
+    openLocalDb(function (db) {
+      try {
+        var tx = db.transaction(LOCAL_STORE, 'readonly');
+        var req = tx.objectStore(LOCAL_STORE).get(id);
+        req.onsuccess = function () {
+          var e = req.result;
+          if (e && e.draft && e.draft.header) done(e); else fail();
         };
         req.onerror = function () { fail(); };
       } catch (e) { fail(); }
@@ -1242,10 +1318,11 @@ var CONFIG = {
     }
     var skipped = 0;
     var sendable = [];
+    // Light rows: title IS the Material ID (stored at save time), and
+    // unanswered was computed during the cursor walk — no draft payloads
+    // are in memory here at all.
     entries.forEach(function (entry) {
-      var d = entry.draft || {};
-      var mid = String(((d.header || {}).materialId) || '').trim();
-      if (mid) sendable.push(entry); else skipped++;
+      if (String(entry.title || '').trim()) sendable.push(entry); else skipped++;
     });
     if (!sendable.length) {
       showStatus('err', 'None of the phone drafts have a Material ID yet — open each one, add it, and save again.');
@@ -1257,7 +1334,7 @@ var CONFIG = {
     });
     var incomplete = 0;
     sendable.forEach(function (entry) {
-      if (draftUnanswered(entry.draft) > 0) incomplete++;
+      if (entry.unanswered > 0) incomplete++;
     });
     var msg = 'Send ' + sendable.length + ' phone draft' + (sendable.length === 1 ? '' : 's') + ' now?';
     if (incomplete) {
@@ -1301,15 +1378,24 @@ var CONFIG = {
       var entry = sendable[i++];
       showStatus('ok', 'Sending ' + i + ' of ' + sendable.length + ' — ' +
         (entry.title || '(no Material ID)') + '…');
-      sendLocalEntry(entry, function (recordId) {
-        sent.push(recordId);
-        // The server also removed this Material ID from the shared
-        // materials list at filing time — keep the mirror in step.
-        dropFromMaterialsMirror(entry.title);
-        if (entry.id === loadedLocalDraftId) mirroredSent = true;
-        deleteLocalDraft(entry.id, next);
+      // Light row → full draft NOW, one at a time: a batch of photo-heavy
+      // drafts never has to fit in memory all at once, and each one is
+      // released before the next is read.
+      getLocalDraft(entry.id, function (full) {
+        sendLocalEntry(full, function (recordId) {
+          sent.push(recordId);
+          // The server also removed this Material ID from the shared
+          // materials list at filing time — keep the mirror in step.
+          dropFromMaterialsMirror(entry.title);
+          if (entry.id === loadedLocalDraftId) mirroredSent = true;
+          deleteLocalDraft(entry.id, next);
+        }, function () {
+          finish(entry);
+        });
       }, function () {
-        finish(entry);
+        // Gone between listing and sending (deleted from another tab) —
+        // skip it rather than aborting the rest of the batch.
+        next();
       });
     }
     next();
@@ -1567,21 +1653,27 @@ var CONFIG = {
         (entry.title || '(no Material ID yet)') + '"' + fmtSavedAt(entry.savedAt) + '?');
       if (!ok) return;
     }
-    closeDraftPicker();
-    closePresetPicker();
-    closeMaterialsPicker();
-    releaseClaimIfHeld();
-    applyDraftObject(entry.draft);   // photos included — local drafts carry them
-    showNeeds = false;
-    incompleteWarned = 0;
-    defaultedFields = {};
-    applyDefaults();
-    renderAll();
-    setSignoffInputs();
-    schedulePersist();
-    savePhotos();
-    loadedLocalDraftId = entry.id;
-    showStatus('ok', 'Loaded from this phone' + fmtSavedAt(entry.savedAt) + '.');
+    // The picker row is metadata-only — pull the full draft (photos
+    // included) off the store now.
+    getLocalDraft(entry.id, function (full) {
+      closeDraftPicker();
+      closePresetPicker();
+      closeMaterialsPicker();
+      releaseClaimIfHeld();
+      applyDraftObject(full.draft);   // photos included — local drafts carry them
+      showNeeds = false;
+      incompleteWarned = 0;
+      defaultedFields = {};
+      applyDefaults();
+      renderAll();
+      setSignoffInputs();
+      schedulePersist();
+      savePhotos();
+      loadedLocalDraftId = entry.id;
+      showStatus('ok', 'Loaded from this phone' + fmtSavedAt(entry.savedAt) + '.');
+    }, function () {
+      showStatus('err', "Couldn't read that draft from this phone — it may have been deleted. Reopen Load draft.");
+    });
   }
 
   /* Loading cloud content wipes the on-screen photos (they must not ride
@@ -1972,8 +2064,9 @@ var CONFIG = {
         }
         applyCloudDraft(out.record, out.savedAt);
         closeMaterialsPicker();
-        showStatus('ok', 'Editing ' + r.recordId + ' — Submit updates the same record; new photos ' +
-          'add to its folder (already-filed photos are safe in Drive).');
+        showStatus('ok', 'Editing ' + r.recordId + ' — Submit updates the same record. The ' +
+          'original photos are kept and appear on the new PDF automatically; any photos you add ' +
+          'here are appended to them.');
       })
       .catch(function () {
         showStatus('err', "Couldn't reach the cloud — check signal and tap " + r.recordId + ' again.');
