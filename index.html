@@ -64,6 +64,20 @@
     font-family:var(--font-mono);font-weight:600;font-size:12px;color:var(--tint);background:var(--tint-soft);
     padding:4px 8px;border-radius:8px;letter-spacing:0}
   .card-hint{font-size:13px;color:var(--secondary);margin-top:6px;line-height:1.45}
+  /* ---- Profile bar ---- */
+  .profile-bar{margin-top:14px;padding:12px 16px;background:var(--card);border-radius:14px;box-shadow:var(--card-shadow);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .profile-bar .pb-text{font-size:14px;color:var(--ink-2);min-width:0}
+  .profile-bar .pb-name{font-weight:700;color:var(--ink)}
+  .profile-bar .sbtn{flex:0 0 auto}
+  .profile-picker{margin-top:10px}
+
+  .photo-status{margin-top:12px;padding:10px 14px;border-radius:12px;font-size:13.5px;font-weight:600;background:var(--fill);color:var(--tertiary)}
+  .photo-status.ok{background:var(--good-soft);color:var(--good)}
+  .photo-status.err{background:var(--bad-soft);color:var(--bad)}
+  .photo-warn{margin-top:12px;padding:12px 14px;background:var(--warn-soft);border-radius:12px;font-size:13.5px;line-height:1.5;color:var(--ink-2)}
+  .photo-warn strong{color:var(--warn)}
+  .photo-warn + .photo-warn,.photo-warn p{margin:0}
+  .photo-warn p + p{margin-top:9px}
 
   /* ---- Header fields: iOS inset fields ---- */
   .hgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px 14px;margin-top:16px}
@@ -276,6 +290,12 @@
     <div class="net-chip" id="net-chip"><span class="net-dot"></span><span id="net-text">Online</span></div>
   </div>
 
+  <div class="profile-bar" id="profile-bar">
+    <span class="pb-text" id="profile-bar-text">No profile — drafts &amp; presets are shared</span>
+    <button class="sbtn" id="profile-btn" type="button">Choose profile</button>
+  </div>
+  <div class="draft-picker profile-picker" id="profile-picker" style="display:none"></div>
+
   <div class="card accent" id="card-header">
     <div class="card-title">Header</div>
     <div class="hgrid" id="header-grid"></div>
@@ -294,6 +314,7 @@
       <button class="sbtn" id="preset-load-btn" type="button">Load preset</button>
       <button class="sbtn" id="preset-save-btn" type="button">Overwrite preset</button>
       <button class="sbtn" id="preset-add-btn" type="button">Add preset</button>
+      <button class="sbtn" id="preset-delete-btn" type="button">Delete preset</button>
     </div>
     <div class="draft-picker preset-picker" id="preset-picker" style="display:none"></div>
     <div id="params"></div>
@@ -302,6 +323,11 @@
   <div class="card" id="card-photos">
     <div class="card-title">Photos</div>
     <div class="card-hint">Add photos for each item. Tap × on a photo to remove it.</div>
+    <div class="photo-status" id="photo-status" style="display:none"></div>
+    <div class="photo-warn">
+      <p><strong>Best way to add photos:</strong> take them with your phone's normal <strong>Camera app first</strong>, then tap <strong>Library</strong> below to add them here. That way a copy is always saved in your phone's photos, even if the app has a problem.</p>
+      <p><strong>Note:</strong> only <strong>Save local draft</strong> keeps your photos on this phone. <strong>Save draft</strong> does not save photos.</p>
+    </div>
     <div id="photos"></div>
   </div>
 
@@ -382,9 +408,9 @@ var CONFIG = {
     // at submit time (shown back as "Saved as V-007"). It survives here only
     // when a legacy draft carries one, and is then respected on submit.
     header: { project:'', phase:'', materialId:'', recordId:'', submittal:'', model:'', date:'', location:'', quantity:'' },
-    checks: { Identity:[null,null], Condition:[null,null], Documents:[null] },
+    checks: { Identity:[null,null], Condition:[null,null], Documents:[null,null,null] },
     params: [ {name:'', observed:'', result:null} ],
-    photos: [[],[],[],[]],
+    photos: [[],[],[],[],[],[]],
     liro: { name:'', date:'' },
     con: { name:'', status:null },
     // Chosen by the verifier via the picker next to Submit — never computed.
@@ -415,7 +441,9 @@ var CONFIG = {
                'Quantity delivered matches PO and packing slip'],
     Condition: ['No visible damage and shipping protection intact on arrival',
                 'Loose-shipped parts inventoried against packing list'],
-    Documents: ['Packing slip / bill of lading / delivery ticket']
+    Documents: ['Packing slip received and legible',
+                'Bill of lading received and legible',
+                'Delivery ticket received and legible']
   };
 
   var resKinds = { 'Pass':'good', 'Fail':'bad', 'N/A':'na' };
@@ -428,7 +456,7 @@ var CONFIG = {
   var incompleteWarned = 0;
   var lastParamAddTime = 0;
   var lastParamRemoveTime = 0;
-  var photoLabels = ['Nameplate photographed','Condition of material photographed','Packing slip / bill of lading / delivery ticket photographed','Any damage or discrepancy photographed'];
+  var photoLabels = ['Nameplate photographed','Condition of material photographed','Packing slip photographed','Bill of lading photographed','Delivery ticket photographed','Any damage or discrepancy photographed'];
 
   /* ============ Helpers ============ */
   function el(tag, cls, text) {
@@ -470,12 +498,15 @@ var CONFIG = {
   }
 
   /* Compress photos client-side to keep POSTs small. Equipment shots use
-     the field-app limits (1600px / 0.7); the packing-slip section gets more
-     resolution so fine print on a BOL stays legible. Indexed like
-     photoLabels: nameplate, sides, packing slip, damage. */
+     the field-app limits (1600px / 0.7); the three paper-document sections
+     (packing slip, bill of lading, delivery ticket) get more resolution so
+     fine print stays legible. Indexed like photoLabels: nameplate, sides,
+     packing slip, bill of lading, delivery ticket, damage. */
   var photoCompress = [
     { edge: 1600, q: 0.7 },
     { edge: 1600, q: 0.7 },
+    { edge: 2200, q: 0.8 },
+    { edge: 2200, q: 0.8 },
     { edge: 2200, q: 0.8 },
     { edge: 1600, q: 0.7 }
   ];
@@ -535,15 +566,68 @@ var CONFIG = {
     } catch (e) { /* private mode etc. — drafts just don't persist */ }
   }
 
-  // Written only from the photo add/remove paths. Its own try/catch: a photo
-  // set can blow the ~5MB quota where the text draft never will, and if it
-  // does the typed fields still persist (photos just won't survive a reload).
+  // Written only from the photo add/remove paths. Photos used to live in
+  // localStorage, whose ~5MB quota sits exactly on top of a normal 10-15
+  // photo delivery — setItem failed SILENTLY and the set vanished on the
+  // next reload. They now live in the IndexedDB photo vault (the same DB as
+  // local drafts — hundreds of MB), every save reports its outcome to the
+  // status line on the Photos card, and localStorage is kept only as a
+  // fallback home for the rare browser with no IndexedDB.
+  var photoSaveState = 'ok';   // 'ok' | 'saving' | 'err'
+  // False until the boot-time vault restore settles — gates the status line
+  // (no "No photos yet" flash over a set that's still loading) and
+  // checkCloudDraft (an auto-applied cloud draft wipes on-screen photos, so
+  // it must never run against a form whose photos haven't loaded yet).
+  var vaultReady = false;
+
+  function photoTotal() {
+    var n = 0;
+    state.photos.forEach(function (s) { n += s.length; });
+    return n;
+  }
+
+  function updatePhotoStatus() {
+    var host = document.getElementById('photo-status');
+    var n = photoTotal();
+    if (!vaultReady) { host.style.display = 'none'; return; }
+    host.style.display = '';
+    if (photoSaveState === 'err') {
+      host.className = 'photo-status err';
+      host.textContent = '⚠ ' + n + (n === 1 ? ' photo is' : ' photos are') +
+        ' NOT saved on this phone — keep this page open. Free up storage, then add or remove any photo to retry.';
+    } else if (photoSaveState === 'saving') {
+      host.className = 'photo-status';
+      host.textContent = 'Saving photos on this phone…';
+    } else if (n) {
+      host.className = 'photo-status ok';
+      host.textContent = n + (n === 1 ? ' photo' : ' photos') + ' safe on this phone ✓';
+    } else {
+      host.className = 'photo-status';
+      host.textContent = 'No photos yet — they save to this phone automatically as you add them.';
+    }
+  }
+
   function savePhotos() {
     // Photo set changed — same submission-id invalidation as schedulePersist.
     try { localStorage.removeItem(SID_KEY); } catch (e) {}
-    try {
-      localStorage.setItem(PHOTO_KEY, JSON.stringify(state.photos));
-    } catch (e) {}
+    photoSaveState = 'saving';
+    updatePhotoStatus();
+    vaultPut('photos', state.photos, function () {
+      photoSaveState = 'ok';
+      // The vault copy is now the truth — drop the legacy localStorage copy
+      // so a stale small set can't shadow a newer large one.
+      try { localStorage.removeItem(PHOTO_KEY); } catch (e) {}
+      updatePhotoStatus();
+    }, function () {
+      // Vault unavailable — fall back to the old localStorage home so small
+      // sets still survive a reload, and say so plainly when even that
+      // fails instead of losing photos silently.
+      var ok = false;
+      try { localStorage.setItem(PHOTO_KEY, JSON.stringify(state.photos)); ok = true; } catch (e) {}
+      photoSaveState = ok ? 'ok' : 'err';
+      updatePhotoStatus();
+      if (!ok) showStatus('err', "Couldn't save the photos on this phone — free up storage, and don't close this page until they're submitted.");
+    });
   }
 
   /* ============ Shared-write token (optional, off by default) ============
@@ -563,6 +647,182 @@ var CONFIG = {
     try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
   }
 
+  /* ============ Profiles ============
+     A profile is just a verifier's name, chosen per device and shared via a
+     roster tab so the same list appears on the phone AND the computer. It
+     scopes two things: cloud drafts (saved tagged with the profile, so "my
+     drafts" follow me between devices and never auto-load onto a teammate's
+     form) and personal presets (owner field — my presets show only for me,
+     alongside the shared ones). No profile selected = everything behaves as
+     one shared pool, exactly the pre-profile behavior. */
+  var PROFILE_KEY = 'dv-profile';
+  var PROFILES_CACHE_KEY = 'dv-profiles';
+
+  function currentProfile() {
+    try { return String(localStorage.getItem(PROFILE_KEY) || '').trim(); } catch (e) { return ''; }
+  }
+
+  function setProfile(name) {
+    name = String(name || '').trim();
+    try {
+      if (name) localStorage.setItem(PROFILE_KEY, name);
+      else localStorage.removeItem(PROFILE_KEY);
+    } catch (e) {}
+    updateProfileBar();
+    // A profile IS the verifier — prefill the sign-off name if it's blank.
+    if (name && !state.liro.name) {
+      state.liro.name = name;
+      delete defaultedFields.liroName;
+      setSignoffInputs();
+      schedulePersist();
+    }
+  }
+
+  function updateProfileBar() {
+    var t = document.getElementById('profile-bar-text');
+    var b = document.getElementById('profile-btn');
+    var p = currentProfile();
+    t.innerHTML = '';
+    if (p) {
+      t.appendChild(document.createTextNode('Working as '));
+      t.appendChild(el('span', 'pb-name', p));
+      t.appendChild(document.createTextNode(' — your drafts & presets follow this name'));
+      b.textContent = 'Change';
+    } else {
+      t.appendChild(document.createTextNode('No profile — drafts & presets are shared'));
+      b.textContent = 'Choose profile';
+    }
+  }
+
+  function cachedProfiles() {
+    try {
+      var a = JSON.parse(localStorage.getItem(PROFILES_CACHE_KEY));
+      return normalizeProfiles(a);
+    } catch (e) { return []; }
+  }
+
+  function normalizeProfiles(arr) {
+    if (!Array.isArray(arr)) return [];
+    var out = [];
+    arr.forEach(function (n) {
+      n = String(n == null ? '' : n).trim().slice(0, 60);
+      if (!n || isReservedName(n)) return;
+      if (out.some(function (x) { return x.toLowerCase() === n.toLowerCase(); })) return;
+      out.push(n);
+    });
+    return out.slice(0, 40);
+  }
+
+  /* done(list, offline) — same contract as fetchPresets. */
+  function fetchProfiles(done) {
+    var fallback = function () { done(cachedProfiles(), true); };
+    if (!CONFIG.SCRIPT_URL) { fallback(); return; }
+    fetchWithTimeout(CONFIG.SCRIPT_URL + '?profiles=1')
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status !== 'ok' || !Array.isArray(out.profiles)) throw new Error();
+        var list = normalizeProfiles(out.profiles);
+        try { localStorage.setItem(PROFILES_CACHE_KEY, JSON.stringify(list)); } catch (e) {}
+        done(list, false);
+      })
+      .catch(fallback);
+  }
+
+  function addProfileToCloud(name) {
+    if (!CONFIG.SCRIPT_URL) {
+      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
+      return;
+    }
+    showStatus('ok', 'Adding profile "' + name + '"…');
+    fetchWithTimeout(CONFIG.SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'addProfile', token: writeToken(), name: name })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status !== 'ok') throw new Error(out.message || 'rejected');
+        var list = normalizeProfiles(Array.isArray(out.profiles) ? out.profiles : cachedProfiles().concat([name]));
+        try { localStorage.setItem(PROFILES_CACHE_KEY, JSON.stringify(list)); } catch (e) {}
+        setProfile(name);
+        showStatus('ok', 'Profile "' + name + '" added — pick it on your other devices too.');
+      })
+      .catch(function (err) {
+        showStatus('err', (err && err.message && err.message !== 'rejected')
+          ? err.message
+          : "Couldn't add the profile — check signal and try again.");
+      });
+  }
+
+  var profilePickerEl = document.getElementById('profile-picker');
+  var profileBtn = document.getElementById('profile-btn');
+  var profileReqSeq = 0;
+
+  function closeProfilePicker() {
+    profileReqSeq++;
+    profilePickerEl.style.display = 'none';
+    profilePickerEl.innerHTML = '';
+  }
+
+  profileBtn.addEventListener('click', function () {
+    clearStatus();
+    closeProfilePicker();
+    var seq = ++profileReqSeq;
+    profileBtn.disabled = true;
+    var prevLabel = profileBtn.textContent;
+    profileBtn.textContent = 'Loading…';
+    fetchProfiles(function (list, offline) {
+      profileBtn.disabled = false;
+      profileBtn.textContent = prevLabel;
+      if (seq !== profileReqSeq) return;   // superseded while in flight
+      var me = currentProfile();
+      profilePickerEl.innerHTML = '';
+      profilePickerEl.appendChild(el('div', 'draft-picker-head', 'Who is using this device?'));
+      list.forEach(function (name) {
+        var btn = el('button', 'draft-picker-item');
+        btn.type = 'button';
+        btn.appendChild(el('div', 'dp-title', name + (name.toLowerCase() === me.toLowerCase() ? ' ✓' : '')));
+        btn.addEventListener('click', function () {
+          setProfile(name);
+          closeProfilePicker();
+          showStatus('ok', 'Working as "' + name + '" on this device — drafts and presets you save now follow this name.');
+        });
+        profilePickerEl.appendChild(btn);
+      });
+      var none = el('button', 'draft-picker-item');
+      none.type = 'button';
+      none.appendChild(el('div', 'dp-title', 'No profile' + (me ? '' : ' ✓')));
+      none.appendChild(el('div', 'dp-sub', 'shared use — everything visible to everyone'));
+      none.addEventListener('click', function () {
+        setProfile('');
+        closeProfilePicker();
+        showStatus('ok', 'Profile cleared — this device is back to shared use.');
+      });
+      profilePickerEl.appendChild(none);
+      var add = el('button', 'draft-picker-item');
+      add.type = 'button';
+      add.appendChild(el('div', 'dp-title', '+ New profile…'));
+      add.addEventListener('click', function () {
+        var name = window.prompt('Your name (as teammates should see it, e.g. "Mike T."):');
+        if (name == null) return;
+        name = name.trim().slice(0, 60);
+        if (!name) return;
+        if (isReservedName(name)) { showStatus('err', 'That name is reserved — pick another.'); return; }
+        closeProfilePicker();
+        var exists = list.some(function (n) { return n.toLowerCase() === name.toLowerCase(); });
+        if (exists) { setProfile(name); showStatus('ok', 'Working as "' + name + '".'); return; }
+        addProfileToCloud(name);
+      });
+      profilePickerEl.appendChild(add);
+      var cancel = el('button', 'draft-picker-cancel', 'Cancel');
+      cancel.type = 'button';
+      cancel.addEventListener('click', closeProfilePicker);
+      profilePickerEl.appendChild(cancel);
+      profilePickerEl.style.display = 'block';
+      if (offline) showStatus('err', "Couldn't reach the cloud — showing this device's last-known profiles.");
+    });
+  });
+
   var CHECK_GROUP_KEYS = ['Identity', 'Condition', 'Documents'];
 
   /* A draft (local or cloud) can be several versions old, or — for the
@@ -575,6 +835,10 @@ var CONFIG = {
      old "configuration" answer would land on "quantity") — map each
      surviving item to its old slot instead. */
   function migrateLegacyChecks(g, arr) {
+    // Documents is now 3 answers (packing slip / bill of lading / delivery
+    // ticket). Pass it through — normalizeChecks slices/pads to 3, so an
+    // older 1-answer draft just leaves the two new rows blank.
+    if (g === 'Documents') return arr;
     if (arr.length !== 3) return arr;
     if (g === 'Identity') return [arr[0], arr[2]];   // old slot 2 (config) dropped
     if (g === 'Condition') {
@@ -587,7 +851,6 @@ var CONFIG = {
         : null;
       return [merged, arr[2]];
     }
-    if (g === 'Documents') return [arr[0]];          // old slots 2 & 3 dropped
     return arr;
   }
 
@@ -650,14 +913,20 @@ var CONFIG = {
   }
 
   function normalizePhotos(ph) {
-    if (!Array.isArray(ph)) return [[], [], [], []];
+    if (!Array.isArray(ph)) return [[], [], [], [], [], []];
     var arr = ph.slice();
-    // Pre-packing-slip drafts had 3 sections (nameplate, sides, damage) —
-    // insert the packingSlip slot at its current index rather than losing
-    // or misfiling those photos under the wrong section.
-    if (arr.length === 3) arr.splice(2, 0, []);
-    while (arr.length < 4) arr.push([]);
-    arr = arr.slice(0, 4);
+    // Migrate older section layouts by placing the new document slots where
+    // they belong, so existing photos are never lost or misfiled. Damage is
+    // always the LAST section, so it stays pinned to the end.
+    //   3 sections (nameplate, sides, damage)                — pre-2026-07-30
+    //   4 sections (nameplate, sides, packing slip, damage)  — pre-2026-08-08
+    if (arr.length === 3) {
+      arr = [arr[0], arr[1], [], [], [], arr[2]];
+    } else if (arr.length === 4) {
+      arr = [arr[0], arr[1], arr[2], [], [], arr[3]];
+    }
+    while (arr.length < 6) arr.push([]);
+    arr = arr.slice(0, 6);
     return arr.map(function (section) {
       return Array.isArray(section)
         ? section.filter(function (s) { return typeof s === 'string' && s.indexOf('data:') === 0; })
@@ -701,13 +970,9 @@ var CONFIG = {
     try {
       var d = JSON.parse(localStorage.getItem(DRAFT_KEY));
       if (!d || !d.header) return false;
-      // Photos are stored under their own key — fold them back in so
-      // applyDraftObject's normalizePhotos sees them.
-      try {
-        var ph = JSON.parse(localStorage.getItem(PHOTO_KEY));
-        if (Array.isArray(ph)) d.photos = ph;
-      } catch (e2) {}
-      applyDraftObject(d);
+      // Text only — photos are restored separately from the vault
+      // (restorePhotoVault), which also migrates any legacy localStorage set.
+      applyDraftObject(d, { skipPhotos: true });
       return true;
     } catch (e) { return false; /* corrupt draft — start fresh */ }
   }
@@ -718,6 +983,46 @@ var CONFIG = {
       localStorage.removeItem(PHOTO_KEY);
       localStorage.removeItem(SID_KEY);
     } catch (e) {}
+    vaultDel('photos');
+  }
+
+  /* Boot-time photo restore: vault first, then a one-time migration of the
+     legacy localStorage copy (pre-vault app versions). Adopts the stored set
+     only while the form still has zero photos — a photo added during the
+     (millisecond) read must never be clobbered. */
+  function restorePhotoVault(then) {
+    function adopt(ph) {
+      vaultReady = true;
+      if (ph) {
+        var restored = normalizePhotos(ph);
+        var any = false;
+        restored.forEach(function (s) { if (s.length) any = true; });
+        if (any && photoTotal() === 0) {
+          state.photos = restored;
+          renderPhotos();
+        }
+      }
+      updatePhotoStatus();
+      then();
+    }
+    function legacySet() {
+      try {
+        var ph = JSON.parse(localStorage.getItem(PHOTO_KEY));
+        return Array.isArray(ph) ? ph : null;
+      } catch (e) { return null; }
+    }
+    vaultGet('photos', function (val) {
+      if (val) { adopt(val); return; }
+      var legacy = legacySet();
+      adopt(legacy);
+      // Move the legacy copy into the vault (savePhotos drops the old key
+      // once the vault write lands).
+      if (legacy) savePhotos();
+    }, function () {
+      // IndexedDB unavailable — run read-only off the legacy key, exactly
+      // the pre-vault behavior.
+      adopt(legacySet());
+    });
   }
 
   /* ============ Local drafts (multiple, photos included) ============
@@ -730,6 +1035,9 @@ var CONFIG = {
      stacks duplicates. */
   var LOCAL_DB = 'dv-local';
   var LOCAL_STORE = 'drafts';
+  // v2 adds the 'kv' store: the photo vault (key 'photos' — the live form's
+  // photo set, moved out of localStorage and its ~5MB quota).
+  var KV_STORE = 'kv';
   var LOCAL_DRAFT_MAX = 20;
   // Set when the on-screen form came from (or was saved to) a phone draft —
   // a successful Submit deletes that entry so the list doesn't collect
@@ -739,11 +1047,14 @@ var CONFIG = {
   function openLocalDb(done, fail) {
     if (!window.indexedDB) { fail(); return; }
     try {
-      var req = indexedDB.open(LOCAL_DB, 1);
+      var req = indexedDB.open(LOCAL_DB, 2);
       req.onupgradeneeded = function () {
         var db = req.result;
         if (!db.objectStoreNames.contains(LOCAL_STORE)) {
           db.createObjectStore(LOCAL_STORE, { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains(KV_STORE)) {
+          db.createObjectStore(KV_STORE, { keyPath: 'id' });
         }
       };
       req.onsuccess = function () { done(req.result); };
@@ -799,6 +1110,42 @@ var CONFIG = {
         req.onerror = function () { fail(); };
       } catch (e) { fail(); }
     }, fail);
+  }
+
+  /* ---- Photo vault (kv store) helpers — same settle() discipline as
+     putLocalDraft: a failed transaction can fire both onerror and onabort,
+     and the caller must hear exactly one verdict. ---- */
+  function vaultPut(key, value, done, fail) {
+    var settled = false;
+    function settle(fn) { if (settled) return; settled = true; fn(); }
+    openLocalDb(function (db) {
+      try {
+        var tx = db.transaction(KV_STORE, 'readwrite');
+        tx.objectStore(KV_STORE).put({ id: key, value: value });
+        tx.oncomplete = function () { settle(done); };
+        tx.onabort = tx.onerror = function () { settle(fail); };
+      } catch (e) { settle(fail); }
+    }, function () { settle(fail); });
+  }
+
+  function vaultGet(key, done, fail) {
+    openLocalDb(function (db) {
+      try {
+        var tx = db.transaction(KV_STORE, 'readonly');
+        var req = tx.objectStore(KV_STORE).get(key);
+        req.onsuccess = function () { done(req.result ? req.result.value : null); };
+        req.onerror = function () { fail(); };
+      } catch (e) { fail(); }
+    }, fail);
+  }
+
+  /* Best-effort — the callers (clearDraft) never need to hear back. */
+  function vaultDel(key) {
+    openLocalDb(function (db) {
+      try {
+        db.transaction(KV_STORE, 'readwrite').objectStore(KV_STORE).delete(key);
+      } catch (e) {}
+    }, function () {});
   }
 
   /* Best-effort delete — done() runs either way so the UI never hangs on it. */
@@ -976,8 +1323,19 @@ var CONFIG = {
      sync and stay on the device that took them; a successful Submit clears
      the shared draft. */
   function cloudDraft() {
-    // text fields only — no photos
-    return { header: state.header, checks: state.checks, params: state.params, liro: state.liro, con: state.con, overall: state.overall };
+    // text fields only — no photos. owner tags the draft with this device's
+    // profile ('' = shared): it rides inside the stored JSON, groups the
+    // picker into "My drafts" / "Team drafts", and keeps auto-apply from
+    // loading a teammate's draft over this device's form.
+    var d = { header: state.header, checks: state.checks, params: state.params, liro: state.liro, con: state.con, overall: state.overall };
+    var p = currentProfile();
+    if (p) d.owner = p;
+    return d;
+  }
+
+  /** Owner tag stored in a cloud draft, '' for legacy/shared drafts. */
+  function draftOwner(draft) {
+    return String((draft && draft.owner) || '').trim();
   }
 
   /* True while nothing meaningful has been entered on THIS device (smart
@@ -1049,7 +1407,7 @@ var CONFIG = {
     // previous one must not ride along into its record (thumbnails sit below
     // the fold on a phone, so they'd be submitted unseen). savePhotos() too,
     // or the old set would resurrect from localStorage on the next reload.
-    state.photos = [[], [], [], []];
+    state.photos = [[], [], [], [], [], []];
     savePhotos();
     // Wholesale content replacement — any earlier "N items unanswered"
     // warning belonged to the form that's gone now.
@@ -1127,24 +1485,53 @@ var CONFIG = {
       draftPickerEl.appendChild(subAll);
     }
 
-    draftPickerEl.appendChild(el('div', 'draft-picker-head', 'Cloud (all devices)'));
-    if (view.cloudPending) {
-      draftPickerEl.appendChild(el('div', 'dp-note', 'Checking the cloud…'));
-    } else if (view.cloudErr) {
-      draftPickerEl.appendChild(el('div', 'dp-note', "Couldn't reach the cloud — drafts on this phone still work."));
-    } else if (!cloudList.length) {
-      draftPickerEl.appendChild(el('div', 'dp-note', 'No cloud drafts.'));
+    // With a profile selected the cloud section splits: this profile's own
+    // drafts first (the cross-device "fill at the desk, open at the dock"
+    // flow), then everyone else's. Without a profile: one shared list,
+    // exactly the pre-profile behavior.
+    var me = currentProfile();
+    function cloudItem(entry, showOwner) {
+      var lbl = draftLabel(entry.draft);
+      var btn = el('button', 'draft-picker-item');
+      btn.type = 'button';
+      btn.appendChild(el('div', 'dp-title', lbl.title));
+      var own = draftOwner(entry.draft);
+      var subText = (lbl.sub ? lbl.sub + ' — ' : '') + 'saved ' + (fmtDate(entry.savedAt) || 'time unknown') +
+        (showOwner && own ? ' · ' + own : '');
+      btn.appendChild(el('div', 'dp-sub', subText));
+      btn.addEventListener('click', function () { chooseCloudDraft(entry); });
+      draftPickerEl.appendChild(btn);
+    }
+    var mine = [], team = [];
+    cloudList.forEach(function (entry) {
+      if (me && draftOwner(entry.draft).toLowerCase() === me.toLowerCase()) mine.push(entry);
+      else team.push(entry);
+    });
+    if (me) {
+      draftPickerEl.appendChild(el('div', 'draft-picker-head', 'My cloud drafts — ' + me));
+      if (view.cloudPending) {
+        draftPickerEl.appendChild(el('div', 'dp-note', 'Checking the cloud…'));
+      } else if (view.cloudErr) {
+        draftPickerEl.appendChild(el('div', 'dp-note', "Couldn't reach the cloud — drafts on this phone still work."));
+      } else {
+        if (!mine.length) draftPickerEl.appendChild(el('div', 'dp-note', 'No cloud drafts saved as ' + me + '.'));
+        mine.forEach(function (entry) { cloudItem(entry, false); });
+        if (team.length) {
+          draftPickerEl.appendChild(el('div', 'draft-picker-head', 'Team drafts'));
+          team.forEach(function (entry) { cloudItem(entry, true); });
+        }
+      }
     } else {
-      cloudList.forEach(function (entry) {
-        var lbl = draftLabel(entry.draft);
-        var btn = el('button', 'draft-picker-item');
-        btn.type = 'button';
-        btn.appendChild(el('div', 'dp-title', lbl.title));
-        var subText = (lbl.sub ? lbl.sub + ' — ' : '') + 'saved ' + (fmtDate(entry.savedAt) || 'time unknown');
-        btn.appendChild(el('div', 'dp-sub', subText));
-        btn.addEventListener('click', function () { chooseCloudDraft(entry); });
-        draftPickerEl.appendChild(btn);
-      });
+      draftPickerEl.appendChild(el('div', 'draft-picker-head', 'Cloud (all devices)'));
+      if (view.cloudPending) {
+        draftPickerEl.appendChild(el('div', 'dp-note', 'Checking the cloud…'));
+      } else if (view.cloudErr) {
+        draftPickerEl.appendChild(el('div', 'dp-note', "Couldn't reach the cloud — drafts on this phone still work."));
+      } else if (!cloudList.length) {
+        draftPickerEl.appendChild(el('div', 'dp-note', 'No cloud drafts.'));
+      } else {
+        cloudList.forEach(function (entry) { cloudItem(entry, true); });
+      }
     }
 
     var cancel = el('button', 'draft-picker-cancel', 'Cancel');
@@ -1197,11 +1584,20 @@ var CONFIG = {
     showStatus('ok', 'Loaded from this phone' + fmtSavedAt(entry.savedAt) + '.');
   }
 
+  /* Loading cloud content wipes the on-screen photos (they must not ride
+     into a different delivery's record) — the confirm has to say so, since
+     the thumbnails usually sit below the fold on a phone. */
+  function photoWipeNote() {
+    var n = photoTotal();
+    return n ? ' The ' + n + (n === 1 ? ' photo' : ' photos') +
+      ' on screen will be removed — "Save local draft" first to keep them.' : '';
+  }
+
   function chooseCloudDraft(entry) {
     if (!isPristine()) {
       var lbl = draftLabel(entry.draft);
       var ok = window.confirm('Replace everything on this screen with "' + lbl.title + '"' +
-        fmtSavedAt(entry.savedAt) + '?');
+        fmtSavedAt(entry.savedAt) + '?' + photoWipeNote());
       if (!ok) return;
     }
     applyCloudDraft(entry.draft, entry.savedAt);
@@ -1233,14 +1629,30 @@ var CONFIG = {
      that saved drafts exist. The Load button opens the picker instead
      (openDraftPicker above). */
   function checkCloudDraft() {
+    // Never before the photo vault has loaded: an auto-applied cloud draft
+    // wipes on-screen photos, and "no photos yet" during the restore window
+    // would make a photo-carrying form look pristine.
+    if (!vaultReady) return;
     var now = Date.now();
     if (now - lastCloudCheck < 15000) return;
     lastCloudCheck = now;
     fetchCloudDrafts(function (list) {
       if (!list.length) return;
+      // With a profile: only THIS profile's drafts may auto-apply — a
+      // teammate's draft must never quietly take over the form. Without
+      // one: the whole list, exactly the pre-profile behavior.
+      var me = currentProfile();
+      var mine = me
+        ? list.filter(function (d) { return draftOwner(d.draft).toLowerCase() === me.toLowerCase(); })
+        : list;
       if (isPristine()) {
-        applyCloudDraft(list[0].draft, list[0].savedAt);
-      } else if (JSON.stringify(cloudDraft()) !== JSON.stringify(list[0].draft)) {
+        if (mine.length) {
+          applyCloudDraft(mine[0].draft, mine[0].savedAt);
+        } else {
+          showStatus('ok', (list.length > 1 ? list.length + ' team drafts' : 'A team draft') +
+            ' in the cloud — tap "Load draft" to look.');
+        }
+      } else if (mine.length && JSON.stringify(cloudDraft()) !== JSON.stringify(mine[0].draft)) {
         showStatus('ok', (list.length > 1 ? list.length + ' saved drafts' : 'A saved draft') +
           ' available — tap "Load draft" to choose.');
       }
@@ -1259,7 +1671,7 @@ var CONFIG = {
   var MATERIALS_CACHE_KEY = 'dv-materials';
   // Section keys in state.photos index order — must match the server's
   // PHOTO_SECTIONS and buildPayloadFrom's photos mapping.
-  var PHOTO_SECTION_KEYS = ['nameplate', 'sides', 'packingSlip', 'damage'];
+  var PHOTO_SECTION_KEYS = ['nameplate', 'sides', 'packingSlip', 'billOfLading', 'deliveryTicket', 'damage'];
   function stagedPhotoTotal(entry) {
     var n = 0;
     PHOTO_SECTION_KEYS.forEach(function (k) { n += (entry.photoCounts && entry.photoCounts[k]) || 0; });
@@ -1544,7 +1956,7 @@ var CONFIG = {
     var label = r.recordId + (r.materialId ? ' (' + r.materialId + ')' : '');
     if (!window.confirm('Edit already-filed ' + label + '? Submitting again will UPDATE ' +
         'that record and file into its folder' +
-        (isPristine() ? '.' : ' — and everything on this screen is replaced.'))) return;
+        (isPristine() ? '.' : ' — and everything on this screen is replaced.' + photoWipeNote()))) return;
     showStatus('ok', 'Loading ' + r.recordId + '…');
     fetchWithTimeout(CONFIG.SCRIPT_URL + '?recordData=' + encodeURIComponent(r.recordId))
       .then(function (res) { return res.json(); })
@@ -1572,7 +1984,7 @@ var CONFIG = {
     var mid = String(entry.material.header.materialId).trim();
     if (!isPristine()) {
       if (!window.confirm('Replace everything on this screen with "' + mid +
-          '" from the materials list?')) return;
+          '" from the materials list?' + photoWipeNote())) return;
     }
     // applyCloudDraft releases any PREVIOUS claim and nulls loadedMaterialId
     // before rebuilding the form — then this pick claims its own material.
@@ -1674,7 +2086,8 @@ var CONFIG = {
       material: cloudDraft(),
       photos: {
         nameplate: b64(state.photos[0]), sides: b64(state.photos[1]),
-        packingSlip: b64(state.photos[2]), damage: b64(state.photos[3])
+        packingSlip: b64(state.photos[2]), billOfLading: b64(state.photos[3]),
+        deliveryTicket: b64(state.photos[4]), damage: b64(state.photos[5])
       },
       stagedBy: stagedBy
     }, function () {
@@ -1720,15 +2133,94 @@ var CONFIG = {
 
   /* ============ Parameter presets ============
      A preset is a reusable, named parameter list (just the names — results
-     are always answered per delivery). Four built-in defaults ship with the
+     are always answered per delivery). Built-in defaults ship with the
      app; "Overwrite preset" and "Add preset" store to the backend's hidden
      _Presets tab, so a change made on any device is permanent for everyone.
-     A stored preset with a default's name overrides that default. */
+     A stored preset with a default's name overrides that default.
+     Manufacturer / Model No. / Serial No. are intentionally absent from
+     these lists — the Header and Identity checks already cover them. */
   var DEFAULT_PRESETS = [
-    { name: 'MEP',                      params: ['Placeholder parameter'] },
-    { name: 'Electrical',               params: ['Placeholder parameter'] },
-    { name: 'Plumbing/Fire Protection', params: ['Placeholder parameter'] },
-    { name: 'Bulk Material',            params: ['Placeholder parameter'] }
+    { name: 'Electrical – Automatic Transfer Switch', params: [
+      'Voltage(s)', 'Phase line ratings', 'Switch rating', 'Short-circuit capacity',
+      'Protective relays / arc chute / splitter plate inspected', 'Overall dimensions & weight'
+    ] },
+    { name: 'Electrical – Disconnect Switch', params: [
+      'Voltage rating / Number of poles', 'Ampere rating', 'Neutral installed',
+      'Fuse size / class (if fusible)', 'Short circuit current (kAIC)', 'Enclosure type',
+      'Overall dimensions & weight'
+    ] },
+    { name: 'Electrical – Generator', params: [
+      'Rated power', 'Voltage configuration', 'Main breaker rating', 'Engine rating',
+      'Enclosure type', 'Overall dimensions & weight'
+    ] },
+    { name: 'Electrical – Light Fixtures', params: [
+      'Voltage', 'Bulb type', 'Mounting type', 'Special conditions (indoor/outdoor/EM/EP)',
+      'Mounts, reflectors, sensors included', 'Dimensions & weight'
+    ] },
+    { name: 'Electrical – Loadbank', params: [
+      'Rated voltage (V/Ph/Hz)', 'Auxiliary supply (V/Ph/Hz)', 'Rated power (kW)',
+      'Number of wires', 'Enclosure type', 'Overall dimensions', 'Overall weight'
+    ] },
+    { name: 'Electrical – Panelboard', params: [
+      'Voltage/Phase/Hz', 'Busbar ampacity', 'Main breaker / lugs rating',
+      'AIC / short-circuit rating', 'Number of branch circuits', 'Enclosure type',
+      'Overall dimensions & weight'
+    ] },
+    { name: 'Electrical – Switchboard', params: [
+      'Voltage/Phase/Hz', 'Voltage rating', 'AIC / short-circuit rating',
+      'Main breaker / trip rating', 'Enclosure type', 'Conduit entries',
+      'Overall dimensions & weight'
+    ] },
+    { name: 'Electrical – Transformer', params: [
+      'Voltage ratio', 'kVA rating', 'AIC / short-circuit rating', 'Impedance / taps',
+      'Enclosure type', 'Dimensions & weight'
+    ] },
+    { name: 'Mechanical – Air Condensing Unit', params: [
+      'Condenser Model Number', 'Condenser Serial Number', 'Cooling Capacity (MBH)'
+    ] },
+    { name: 'Mechanical – Air Handling Unit', params: [
+      'Air Flow (CFM)', 'SP (in. w.c.)', 'HP/RPM', 'Voltage/Phase/Hz'
+    ] },
+    { name: 'Mechanical – Air Terminal Unit', params: [
+      'Inlet Size (in)', 'Cooling Minimum Air Flow (CFM)'
+    ] },
+    { name: 'Mechanical – Electric Unit Heater', params: [
+      'Heating Capacity (MBH)', 'Heater Element Wattage (kW)', 'Heater Element Voltage/Ph/Hz'
+    ] },
+    { name: 'Mechanical – Kitchen Ventilator', params: [
+      'Air Flow (CFM)', 'SP (in. w.c.)', 'HP/RPM', 'Voltage/Phase/Hz'
+    ] },
+    { name: 'Mechanical – Power Ventilator', params: [
+      'Air Flow (CFM)', 'SP (in. w.c.)', 'HP/RPM', 'Voltage/Phase/Hz'
+    ] },
+    { name: 'Mechanical – Re-Heat Coil', params: [
+      'Air Flow (CFM)', 'Voltage/Phase/Hz (if required)'
+    ] },
+    { name: 'Plumbing – Drinking Fountain', params: [
+      'Filter Type', 'Filter Model Number', 'Filter Capacity', 'Voltage/Phase/Hz'
+    ] },
+    { name: 'Plumbing – Electric Water Heater', params: [
+      'Temperature Rise', 'Recovery Rate', 'Voltage/Phase/Hz'
+    ] },
+    { name: 'Plumbing – Plumbing Fixtures', params: [
+      'Materials finish', 'Rough-in requirement met', 'Accessories included',
+      'Voltage/Phase/Hz (if required)'
+    ] },
+    { name: 'Plumbing – Sewage Ejector Pumps', params: [
+      'Voltage/Phase/Hz', 'Flow Rate (GPM)', 'Total Head', 'Horsepower'
+    ] },
+    { name: 'Plumbing – Triplex Booster Pumps', params: [
+      'Flow Rate', 'Total Head', 'Impeller Diameter', 'Voltage/Phase/Hz', 'Horsepower'
+    ] },
+    { name: 'Sprinkler – Fire Pump', params: [
+      'Voltage/Phase/Hz', 'Flow Rate (GPM)', 'Total Head', 'Horsepower'
+    ] },
+    { name: 'Sprinkler – Fire Pump Transfer Switch', params: [
+      'Voltage/Phase/Hz', 'Amperage', 'Number of Wires (3 or 4)', 'Automatic or Manual Transfer'
+    ] },
+    { name: 'Sprinkler – Jockey Pump', params: [
+      'Voltage/Phase/Hz', 'Flow Rate (GPM)', 'Total Head', 'Horsepower'
+    ] }
   ];
   var PRESETS_CACHE_KEY = 'dv-presets';
 
@@ -1761,12 +2253,19 @@ var CONFIG = {
       // refuses these, but an older stored row (or a direct POST) must never
       // reach mergePresets as a live map key on the client either.
       if (isReservedName(name)) return;
+      // Owner: '' = shared with everyone, a profile name = personal.
+      var owner = String(p.owner || '').trim().slice(0, 60);
+      if (isReservedName(owner)) owner = '';
+      // Hide marker (server tombstone row): a deleted built-in default
+      // (owner '') or a per-profile hide of a shared preset (owner set) —
+      // carries no params, just tells mergePresets to drop the covered entry.
+      if (p.deleted === true) { out.push({ name: name, deleted: true, owner: owner }); return; }
       var params = Array.isArray(p.params)
         ? p.params.map(function (n) { return String(n == null ? '' : n).trim(); })
             .filter(function (n) { return n; }).slice(0, 50)
         : [];
       if (!params.length) return;
-      var entry = { name: name, params: params };
+      var entry = { name: name, params: params, owner: owner };
       // Optional material profile: submittal/model the preset also fills.
       // Whitelisted keys only — same defensive posture as everything else
       // that can arrive from the endpoint or stale cache.
@@ -1783,22 +2282,37 @@ var CONFIG = {
     return out;
   }
 
-  /* Defaults first (stable order), overridden by any stored preset with the
-     same name (case-insensitive), then extra stored presets after. */
+  /* Defaults first (stable order), then the stored presets THIS device may
+     see: shared rows (owner '') and the current profile's personal rows —
+     other profiles' personal presets never surface here. Shared rows are
+     applied before personal ones, so a personal preset (or personal hide
+     marker) always wins a name collision — that's what makes "my version of
+     Panelboard" and "hide Loadbank just for me" work. */
   function mergePresets(custom) {
+    var me = currentProfile().toLowerCase();
     var out = [];
     // Null-prototype map so a name like "__proto__" is an ordinary key, not
     // a path to Object.prototype (defense-in-depth alongside isReservedName).
     var byName = Object.create(null);
     DEFAULT_PRESETS.forEach(function (p) {
-      var copy = { name: p.name, params: p.params.slice() };
+      var copy = { name: p.name, params: p.params.slice(), builtin: true, owner: '' };
       byName[p.name.toLowerCase()] = copy;
       out.push(copy);
     });
-    custom.forEach(function (p) {
+    function removeEntry(k) {
+      if (!byName[k]) return;
+      var i = out.indexOf(byName[k]);
+      if (i !== -1) out.splice(i, 1);
+      delete byName[k];
+    }
+    function applyOne(p) {
       var k = p.name.toLowerCase();
+      // A hide marker deletes whatever entry it names (built-in default or
+      // shared preset); a marker for a name with no entry is stale — ignored.
+      if (p.deleted) { removeEntry(k); return; }
       if (byName[k]) {
         byName[k].params = p.params.slice();
+        byName[k].owner = p.owner || '';
         // Stored profile replaces (or clears) the default's — the stored
         // preset is the whole truth for its name.
         if (p.header) byName[k].header = p.header;
@@ -1807,6 +2321,11 @@ var CONFIG = {
         byName[k] = p;
         out.push(p);
       }
+    }
+    custom.forEach(function (p) { if (!(p.owner || '')) applyOne(p); });
+    custom.forEach(function (p) {
+      var o = String(p.owner || '').toLowerCase();
+      if (o && me && o === me) applyOne(p);
     });
     return out;
   }
@@ -1844,15 +2363,36 @@ var CONFIG = {
 
   function renderPresetPicker(list, onPick) {
     presetPickerEl.innerHTML = '';
+    // Grouped by trade prefix: "Electrical – Panelboard" renders as
+    // "Panelboard" under an "Electrical" header. A preset with no
+    // "<trade> – " prefix (older custom saves) lands under "Other", shown
+    // last. Confirm dialogs and storage keep using the FULL name — only the
+    // picker display is shortened.
+    var groups = [];
+    var byGroup = Object.create(null);
     list.forEach(function (p) {
-      var btn = el('button', 'draft-picker-item');
-      btn.type = 'button';
-      btn.appendChild(el('div', 'dp-title', p.name));
-      btn.appendChild(el('div', 'dp-sub',
-        p.params.length + (p.params.length === 1 ? ' parameter' : ' parameters') +
-        (p.header ? ' · fills submittal/model' : '')));
-      btn.addEventListener('click', function () { onPick(p); });
-      presetPickerEl.appendChild(btn);
+      var m = /\s[–-]\s/.exec(p.name);
+      var g = m ? p.name.slice(0, m.index) : 'Other';
+      var short = m ? p.name.slice(m.index + m[0].length) : p.name;
+      if (!byGroup[g]) { byGroup[g] = []; groups.push(g); }
+      byGroup[g].push({ p: p, short: short });
+    });
+    var oi = groups.indexOf('Other');
+    if (oi !== -1) { groups.splice(oi, 1); groups.push('Other'); }
+    groups.forEach(function (g) {
+      if (groups.length > 1) presetPickerEl.appendChild(el('div', 'draft-picker-head', g));
+      byGroup[g].forEach(function (item) {
+        var p = item.p;
+        var btn = el('button', 'draft-picker-item');
+        btn.type = 'button';
+        btn.appendChild(el('div', 'dp-title', item.short));
+        btn.appendChild(el('div', 'dp-sub',
+          p.params.length + (p.params.length === 1 ? ' parameter' : ' parameters') +
+          (p.owner ? ' · personal' : '') +
+          (p.header ? ' · fills submittal/model' : '')));
+        btn.addEventListener('click', function () { onPick(p); });
+        presetPickerEl.appendChild(btn);
+      });
     });
     var cancel = el('button', 'draft-picker-cancel', 'Cancel');
     cancel.type = 'button';
@@ -1909,7 +2449,11 @@ var CONFIG = {
     return prof;
   }
 
-  function savePresetToCloud(name) {
+  /* owner '' = shared with the whole team; a profile name = personal to
+     that profile. Storage rows are keyed by (name, owner) on the server,
+     and the offline cache mirrors that. */
+  function savePresetToCloud(name, owner) {
+    owner = String(owner || '').trim();
     var params = currentParamNames();
     if (!params.length) {
       showStatus('err', 'Name at least one parameter before saving it to a preset.');
@@ -1924,7 +2468,7 @@ var CONFIG = {
     fetchWithTimeout(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'savePreset', token: writeToken(), preset: { name: name, params: params, header: profile } })
+      body: JSON.stringify({ action: 'savePreset', token: writeToken(), preset: { name: name, params: params, header: profile, owner: owner } })
     })
       .then(function (res) { return res.json(); })
       .then(function (out) {
@@ -1935,19 +2479,23 @@ var CONFIG = {
         var custom = cachedCustomPresets();
         var found = false;
         custom.forEach(function (p) {
-          if (p.name.toLowerCase() === name.toLowerCase()) {
+          if (p.name.toLowerCase() === name.toLowerCase() &&
+              String(p.owner || '').toLowerCase() === owner.toLowerCase()) {
             p.params = params.slice();
+            p.deleted = false;
             if (hasProfile) p.header = profile; else delete p.header;
             found = true;
           }
         });
         if (!found) {
-          var fresh = { name: name, params: params.slice() };
+          var fresh = { name: name, params: params.slice(), owner: owner };
           if (hasProfile) fresh.header = profile;
           custom.push(fresh);
         }
         cacheCustomPresets(custom);
-        showStatus('ok', 'Preset "' + name + '" saved — it\'s now available on every device.');
+        showStatus('ok', owner
+          ? 'Preset "' + name + '" saved as your personal preset — it follows "' + owner + '" on every device.'
+          : 'Preset "' + name + '" saved — it\'s now available to everyone.');
       })
       .catch(function (err) {
         showStatus('err', (err && err.message && err.message !== 'rejected')
@@ -1956,9 +2504,76 @@ var CONFIG = {
       });
   }
 
+  /* Three shapes of delete, all keyed by (name, owner) on the server:
+     - personal preset (owner = my profile, tombstone false): row removed,
+       gone for me only (a shared/built-in preset it shadowed resurfaces).
+     - shared preset for everyone (owner '', tombstone = whether the name is
+       a built-in default): row removed, or a shared hide marker for a
+       built-in that would otherwise come back baked into the app.
+     - hide a shared/built-in preset just for me (owner = my profile,
+       tombstone true): a personal hide marker — everyone else keeps it.
+     "Add preset" with the same name and scope later revives any of them. */
+  function deletePresetFromCloud(name, owner, tombstone) {
+    owner = String(owner || '').trim();
+    if (!CONFIG.SCRIPT_URL) {
+      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
+      return;
+    }
+    showStatus('ok', (tombstone && owner ? 'Hiding' : 'Deleting') + ' preset "' + name + '"…');
+    fetchWithTimeout(CONFIG.SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'deletePreset', token: writeToken(), name: name, owner: owner, tombstone: tombstone })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status !== 'ok') throw new Error(out.message || 'rejected');
+        // Keep the offline copy in step, same as savePresetToCloud: drop the
+        // cached (name, owner) entry, and remember the hide marker so the
+        // picker is right even before the next fetch.
+        var custom = cachedCustomPresets().filter(function (p) {
+          return !(p.name.toLowerCase() === name.toLowerCase() &&
+                   String(p.owner || '').toLowerCase() === owner.toLowerCase());
+        });
+        if (tombstone) custom.push({ name: name, deleted: true, owner: owner });
+        cacheCustomPresets(custom);
+        showStatus('ok', tombstone && owner
+          ? 'Preset "' + name + '" hidden for you — teammates still see it.'
+          : owner
+            ? 'Your personal preset "' + name + '" is deleted.'
+            : 'Preset "' + name + '" deleted for everyone.');
+      })
+      .catch(function (err) {
+        showStatus('err', (err && err.message && err.message !== 'rejected')
+          ? err.message
+          : "Couldn't delete the preset — check signal and try again.");
+      });
+  }
+
+  /* Two-option chooser rendered in the preset picker (used where a binary
+     window.confirm can't offer a real choice + cancel). */
+  function renderPresetChooser(heading, options) {
+    presetPickerEl.innerHTML = '';
+    presetPickerEl.appendChild(el('div', 'draft-picker-head', heading));
+    options.forEach(function (o) {
+      var btn = el('button', 'draft-picker-item');
+      btn.type = 'button';
+      btn.appendChild(el('div', 'dp-title', o.label));
+      if (o.sub) btn.appendChild(el('div', 'dp-sub', o.sub));
+      btn.addEventListener('click', function () { closePresetPicker(); o.fn(); });
+      presetPickerEl.appendChild(btn);
+    });
+    var cancel = el('button', 'draft-picker-cancel', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', closePresetPicker);
+    presetPickerEl.appendChild(cancel);
+    presetPickerEl.style.display = 'block';
+  }
+
   var presetLoadBtn = document.getElementById('preset-load-btn');
   var presetSaveBtn = document.getElementById('preset-save-btn');
   var presetAddBtn = document.getElementById('preset-add-btn');
+  var presetDeleteBtn = document.getElementById('preset-delete-btn');
 
   presetLoadBtn.addEventListener('click', function () {
     clearStatus();
@@ -2014,12 +2629,16 @@ var CONFIG = {
           showStatus('err', 'Name at least one parameter before saving it to a preset.');
           return;
         }
+        // Scope follows the preset being overwritten: a personal preset
+        // stays personal, a shared/built-in one stays shared.
+        var scope = String(p.owner || '').trim();
         var ok = window.confirm('Overwrite preset "' + p.name + '" with the current ' +
           params.length + (params.length === 1 ? ' parameter' : ' parameters') +
-          '? This changes it permanently for everyone.');
+          (scope ? '? This changes your personal preset on all your devices.'
+                 : '? This changes it permanently for everyone.'));
         if (!ok) return;
         closePresetPicker();
-        savePresetToCloud(p.name);
+        savePresetToCloud(p.name, scope);
       });
     });
   });
@@ -2044,22 +2663,89 @@ var CONFIG = {
     // Check the FRESH shared list, not just this device's cache: a phone that
     // hasn't loaded presets recently would otherwise skip the "already
     // exists" warning and silently overwrite a teammate's same-named preset
-    // (the server upserts by name).
-    presetAddBtn.disabled = true;
-    presetAddBtn.textContent = 'Checking…';
+    // (the server upserts by name+scope).
+    function addWithScope(scope) {
+      presetAddBtn.disabled = true;
+      presetAddBtn.textContent = 'Checking…';
+      fetchPresets(function (list, offline) {
+        presetAddBtn.disabled = false;
+        presetAddBtn.textContent = 'Add preset';
+        // Only a same-name entry in the SAME scope is an overwrite; a
+        // personal preset named like a shared one is a deliberate shadow.
+        var exists = list.some(function (p) {
+          return p.name.toLowerCase() === name.toLowerCase() &&
+                 String(p.owner || '').toLowerCase() === scope.toLowerCase();
+        });
+        if (exists) {
+          if (!window.confirm('A preset named "' + name + '"' +
+              (offline ? " exists on this device's last-known list" : ' already exists') +
+              (scope ? ' in your personal presets' : '') + ' — overwrite it?')) return;
+        } else if (offline) {
+          if (!window.confirm("Couldn't check the shared list (no signal). Save \"" + name +
+              '" anyway? If ' + (scope ? 'you' : 'a teammate') + ' already used this name, it will be overwritten.')) return;
+        }
+        savePresetToCloud(name, scope);
+      });
+    }
+    var prof = currentProfile();
+    if (prof) {
+      renderPresetChooser('Who should see "' + name + '"?', [
+        { label: 'Just me (' + prof + ')', sub: 'personal — follows your profile on every device',
+          fn: function () { addWithScope(prof); } },
+        { label: 'The whole team', sub: 'shared — everyone gets it',
+          fn: function () { addWithScope(''); } }
+      ]);
+    } else {
+      addWithScope('');
+    }
+  });
+
+  presetDeleteBtn.addEventListener('click', function () {
+    clearStatus();
+    closeDraftPicker();
+    closePresetPicker();
+    closeMaterialsPicker();
+    var seq = ++presetReqSeq;
+    presetDeleteBtn.disabled = true;
+    presetDeleteBtn.textContent = 'Loading…';
     fetchPresets(function (list, offline) {
-      presetAddBtn.disabled = false;
-      presetAddBtn.textContent = 'Add preset';
-      var exists = list.some(function (p) { return p.name.toLowerCase() === name.toLowerCase(); });
-      if (exists) {
-        if (!window.confirm('A preset named "' + name + '"' +
-            (offline ? " exists on this device's last-known list" : ' already exists') +
-            ' — overwrite it?')) return;
-      } else if (offline) {
-        if (!window.confirm("Couldn't check the shared list (no signal). Save \"" + name +
-            '" anyway? If a teammate already used this name, it will be overwritten.')) return;
+      presetDeleteBtn.disabled = false;
+      presetDeleteBtn.textContent = 'Delete preset';
+      if (seq !== presetReqSeq) return;   // superseded while in flight
+      // Deleting is a shared, permanent change — never offer it against a
+      // stale offline list, where the pick itself might be wrong.
+      if (offline) {
+        showStatus('err', "Couldn't reach the cloud — deleting a preset needs a connection.");
+        return;
       }
-      savePresetToCloud(name);
+      renderPresetPicker(list, function (p) {
+        var me = currentProfile();
+        var scope = String(p.owner || '').trim();
+        if (scope) {
+          // My personal preset — deleting affects only me.
+          if (!window.confirm('Delete your personal preset "' + p.name + '"?' +
+              (p.builtin ? ' The standard version comes back for you.' : ''))) return;
+          closePresetPicker();
+          deletePresetFromCloud(p.name, scope, false);
+        } else if (me) {
+          // Shared or built-in, and I have a profile: hide for me, or
+          // delete for the whole team.
+          renderPresetChooser('Delete "' + p.name + '"…', [
+            { label: 'Hide it just for me', sub: 'teammates keep it; re-add the name to bring it back',
+              fn: function () { deletePresetFromCloud(p.name, me, true); } },
+            { label: 'Delete it for everyone', sub: 'cannot be undone (re-adding the name brings it back)',
+              fn: function () {
+                if (!window.confirm('Delete preset "' + p.name + '" for EVERYONE?')) return;
+                deletePresetFromCloud(p.name, '', !!p.builtin);
+              } }
+          ]);
+        } else {
+          if (!window.confirm('Delete preset "' + p.name + '" for everyone? ' +
+              'This cannot be undone (re-adding a preset with the same name brings it back).')) return;
+          closePresetPicker();
+          deletePresetFromCloud(p.name, '', !!p.builtin);
+        }
+      });
     });
   });
 
@@ -2400,6 +3086,7 @@ var CONFIG = {
       box.appendChild(row);
       host.appendChild(box);
     });
+    updatePhotoStatus();
     updateVisuals();
   }
 
@@ -2544,9 +3231,9 @@ var CONFIG = {
 
   function resetForm() {
     state.header = { project:'', phase:'', materialId:'', recordId:'', submittal:'', model:'', date:'', location:'', quantity:'' };
-    state.checks = { Identity:[null,null], Condition:[null,null], Documents:[null] };
+    state.checks = { Identity:[null,null], Condition:[null,null], Documents:[null,null,null] };
     state.params = [ {name:'', observed:'', result:null} ];
-    state.photos = [[],[],[],[]];
+    state.photos = [[],[],[],[],[],[]];
     state.liro = { name:'', date:'' };
     state.con = { name:'', status:null };
     state.overall = null;
@@ -2603,7 +3290,7 @@ var CONFIG = {
           result: p.result || null
         };
       }),
-      photos: { nameplate: b64(s.photos[0]), sides: b64(s.photos[1]), packingSlip: b64(s.photos[2]), damage: b64(s.photos[3]) },
+      photos: { nameplate: b64(s.photos[0]), sides: b64(s.photos[1]), packingSlip: b64(s.photos[2]), billOfLading: b64(s.photos[3]), deliveryTicket: b64(s.photos[4]), damage: b64(s.photos[5]) },
       // The app is the single source of truth for wording — the server uses
       // these for the PDF and processing, so renaming an item here never
       // requires touching or redeploying the script. (Parameter names are
@@ -2959,12 +3646,22 @@ var CONFIG = {
   setNet();
 
   /* ============ Init ============ */
+  // Ask the browser to shield this site's storage (photo vault, local
+  // drafts) from automatic eviction under storage pressure. Best-effort and
+  // silent — browsers that say no just keep today's behavior.
+  if (navigator.storage && navigator.storage.persist) {
+    try { navigator.storage.persist().catch(function () {}); } catch (e) {}
+  }
+  updateProfileBar();
   loadDraft();
   applyDefaults();
   renderAll();
   setSignoffInputs();
   updateVisuals();
-  checkCloudDraft();
+  // Photos load from the vault after first paint; the cloud-draft check
+  // waits for them (it auto-applies over a "pristine" form, and pristine
+  // can't be judged while photos are still loading).
+  restorePhotoVault(function () { checkCloudDraft(); });
 
   // Returning to the app (home-screen resume, tab switch) re-checks quietly,
   // so a draft saved at the desk shows up without a manual refresh.
