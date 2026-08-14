@@ -169,6 +169,8 @@
   .dp-row .draft-picker-item{border-bottom:none;flex:1 1 auto}
   .dp-del{flex:0 0 44px;border:none;background:var(--card);color:var(--tertiary);font-size:17px;cursor:pointer;padding:0}
   .dp-del:hover{color:var(--bad-vivid)}
+  .dp-act{flex:0 0 auto;min-width:44px;min-height:44px;border:none;border-left:1px solid var(--sep);background:var(--card);color:var(--tint);font-size:13px;font-weight:600;cursor:pointer;padding:0 10px}
+  .dp-act:hover{background:var(--tint-soft)}
   .dp-note{font-size:13px;color:var(--secondary);padding:11px 16px;border-bottom:1px solid var(--sep)}
   .dp-submit-all{width:100%;min-height:46px;padding:10px 16px;border:none;background:var(--tint);color:#fff;font-size:15px;font-weight:600;cursor:pointer}
   .dp-submit-all:hover{background:#0779BE}
@@ -2404,6 +2406,7 @@ var CONFIG = {
       // shared preset); a marker for a name with no entry is stale — ignored.
       if (p.deleted) { removeEntry(k); return; }
       if (byName[k]) {
+        byName[k].name = p.name;   // stored casing wins (case-only rename)
         byName[k].params = p.params.slice();
         byName[k].owner = p.owner || '';
         // Stored profile replaces (or clears) the default's — the stored
@@ -2454,7 +2457,7 @@ var CONFIG = {
     presetPickerEl.innerHTML = '';
   }
 
-  function renderPresetPicker(list, onPick) {
+  function renderPresetPicker(list, onPick, rowActions) {
     presetPickerEl.innerHTML = '';
     // Grouped by trade prefix: "Electrical – Panelboard" renders as
     // "Panelboard" under an "Electrical" header. A preset with no
@@ -2484,7 +2487,22 @@ var CONFIG = {
           (p.owner ? ' · personal' : '') +
           (p.header ? ' · fills submittal/model' : '')));
         btn.addEventListener('click', function () { onPick(p); });
-        presetPickerEl.appendChild(btn);
+        // Optional per-row action buttons (the Load picker's Rename / Copy)
+        // — same dp-row shell the phone-draft list uses for its × delete.
+        if (rowActions && rowActions.length) {
+          var row = el('div', 'dp-row');
+          row.appendChild(btn);
+          rowActions.forEach(function (a) {
+            var act = el('button', 'dp-act', a.label);
+            act.type = 'button';
+            act.setAttribute('aria-label', a.label + ' preset "' + p.name + '"');
+            act.addEventListener('click', function () { a.fn(p); });
+            row.appendChild(act);
+          });
+          presetPickerEl.appendChild(row);
+        } else {
+          presetPickerEl.appendChild(btn);
+        }
       });
     });
     var cancel = el('button', 'draft-picker-cancel', 'Cancel');
@@ -2545,6 +2563,57 @@ var CONFIG = {
   /* owner '' = shared with the whole team; a profile name = personal to
      that profile. Storage rows are keyed by (name, owner) on the server,
      and the offline cache mirrors that. */
+
+  /* Cloud write + offline-cache sync for one preset row. No status
+     messages — callers narrate. Resolves on 'ok', rejects with the server's
+     message otherwise. params/header arrive explicitly (not read from the
+     form) so the Rename/Copy flows can save a preset's own data. */
+  function savePresetRow(name, owner, params, header) {
+    if (!CONFIG.SCRIPT_URL) {
+      return Promise.reject(new Error('App is not configured yet — the Apps Script URL is missing in CONFIG.'));
+    }
+    var hasProfile = !!(header && (header.submittal || header.model));
+    return fetchWithTimeout(CONFIG.SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'savePreset', token: writeToken(), preset: { name: name, params: params, header: header || {}, owner: owner } })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (out) {
+        if (out.status !== 'ok') throw new Error(out.message || 'rejected');
+        // Keep the offline copy in step so the picker is right even before
+        // the next successful fetch.
+        var custom = cachedCustomPresets();
+        var found = false;
+        custom.forEach(function (p) {
+          if (p.name.toLowerCase() === name.toLowerCase() &&
+              String(p.owner || '').toLowerCase() === owner.toLowerCase()) {
+            p.name = name;   // an upsert refreshes the stored casing too
+            p.params = params.slice();
+            p.deleted = false;
+            if (hasProfile) p.header = header; else delete p.header;
+            found = true;
+          }
+        });
+        if (!found) {
+          var fresh = { name: name, params: params.slice(), owner: owner };
+          if (hasProfile) fresh.header = header;
+          custom.push(fresh);
+        }
+        cacheCustomPresets(custom);
+      });
+  }
+
+  /* Shared .catch handler: server-provided messages surface as-is, anything
+     else (network/timeout/'rejected') gets the caller's plain fallback. */
+  function presetErrStatus(fallback) {
+    return function (err) {
+      showStatus('err', (err && err.message && err.message !== 'rejected')
+        ? err.message
+        : fallback);
+    };
+  }
+
   function savePresetToCloud(name, owner) {
     owner = String(owner || '').trim();
     var params = currentParamNames();
@@ -2552,49 +2621,14 @@ var CONFIG = {
       showStatus('err', 'Name at least one parameter before saving it to a preset.');
       return;
     }
-    if (!CONFIG.SCRIPT_URL) {
-      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
-      return;
-    }
-    var profile = currentPresetHeader();
     showStatus('ok', 'Saving preset "' + name + '"…');
-    fetchWithTimeout(CONFIG.SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'savePreset', token: writeToken(), preset: { name: name, params: params, header: profile, owner: owner } })
-    })
-      .then(function (res) { return res.json(); })
-      .then(function (out) {
-        if (out.status !== 'ok') throw new Error(out.message || 'rejected');
-        // Keep the offline copy in step so the picker is right even before
-        // the next successful fetch.
-        var hasProfile = !!(profile.submittal || profile.model);
-        var custom = cachedCustomPresets();
-        var found = false;
-        custom.forEach(function (p) {
-          if (p.name.toLowerCase() === name.toLowerCase() &&
-              String(p.owner || '').toLowerCase() === owner.toLowerCase()) {
-            p.params = params.slice();
-            p.deleted = false;
-            if (hasProfile) p.header = profile; else delete p.header;
-            found = true;
-          }
-        });
-        if (!found) {
-          var fresh = { name: name, params: params.slice(), owner: owner };
-          if (hasProfile) fresh.header = profile;
-          custom.push(fresh);
-        }
-        cacheCustomPresets(custom);
+    savePresetRow(name, owner, params, currentPresetHeader())
+      .then(function () {
         showStatus('ok', owner
           ? 'Preset "' + name + '" saved as your personal preset — it follows "' + owner + '" on every device.'
           : 'Preset "' + name + '" saved — it\'s now available to everyone.');
       })
-      .catch(function (err) {
-        showStatus('err', (err && err.message && err.message !== 'rejected')
-          ? err.message
-          : "Couldn't save the preset — check signal and try again.");
-      });
+      .catch(presetErrStatus("Couldn't save the preset — check signal and try again."));
   }
 
   /* Three shapes of delete, all keyed by (name, owner) on the server:
@@ -2606,14 +2640,11 @@ var CONFIG = {
      - hide a shared/built-in preset just for me (owner = my profile,
        tombstone true): a personal hide marker — everyone else keeps it.
      "Add preset" with the same name and scope later revives any of them. */
-  function deletePresetFromCloud(name, owner, tombstone) {
-    owner = String(owner || '').trim();
+  function deletePresetRow(name, owner, tombstone) {
     if (!CONFIG.SCRIPT_URL) {
-      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
-      return;
+      return Promise.reject(new Error('App is not configured yet — the Apps Script URL is missing in CONFIG.'));
     }
-    showStatus('ok', (tombstone && owner ? 'Hiding' : 'Deleting') + ' preset "' + name + '"…');
-    fetchWithTimeout(CONFIG.SCRIPT_URL, {
+    return fetchWithTimeout(CONFIG.SCRIPT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ action: 'deletePreset', token: writeToken(), name: name, owner: owner, tombstone: tombstone })
@@ -2621,7 +2652,7 @@ var CONFIG = {
       .then(function (res) { return res.json(); })
       .then(function (out) {
         if (out.status !== 'ok') throw new Error(out.message || 'rejected');
-        // Keep the offline copy in step, same as savePresetToCloud: drop the
+        // Keep the offline copy in step, same as savePresetRow: drop the
         // cached (name, owner) entry, and remember the hide marker so the
         // picker is right even before the next fetch.
         var custom = cachedCustomPresets().filter(function (p) {
@@ -2630,17 +2661,21 @@ var CONFIG = {
         });
         if (tombstone) custom.push({ name: name, deleted: true, owner: owner });
         cacheCustomPresets(custom);
+      });
+  }
+
+  function deletePresetFromCloud(name, owner, tombstone) {
+    owner = String(owner || '').trim();
+    showStatus('ok', (tombstone && owner ? 'Hiding' : 'Deleting') + ' preset "' + name + '"…');
+    deletePresetRow(name, owner, tombstone)
+      .then(function () {
         showStatus('ok', tombstone && owner
           ? 'Preset "' + name + '" hidden for you — teammates still see it.'
           : owner
             ? 'Your personal preset "' + name + '" is deleted.'
             : 'Preset "' + name + '" deleted for everyone.');
       })
-      .catch(function (err) {
-        showStatus('err', (err && err.message && err.message !== 'rejected')
-          ? err.message
-          : "Couldn't delete the preset — check signal and try again.");
-      });
+      .catch(presetErrStatus("Couldn't delete the preset — check signal and try again."));
   }
 
   /* Two-option chooser rendered in the preset picker (used where a binary
@@ -2661,6 +2696,155 @@ var CONFIG = {
     cancel.addEventListener('click', closePresetPicker);
     presetPickerEl.appendChild(cancel);
     presetPickerEl.style.display = 'block';
+  }
+
+  /* ============ Rename / Copy (Load-picker row actions) ============
+     Both are composed from the two writes the live backend already has:
+     rename = save the same parameter list under the new name, then remove
+     (or hide) the old row; copy = save a duplicate under the new name — no
+     new server action, so an old server can't misroute either one. Scope
+     rules mirror Delete/Add: a personal preset renames for me only; a
+     shared/built-in one offers "everyone" vs "just me" when a profile is
+     set. A case-only rename ("panelboard" → "Panelboard") is a single
+     upsert — same storage key on the server, so nothing to delete. */
+  function renamePresetFlow(p) {
+    closePresetPicker();
+    clearStatus();
+    var oldName = p.name;
+    var name = window.prompt('New name for "' + oldName + '":', oldName);
+    if (name == null) return;
+    name = name.trim().slice(0, 80);
+    if (!name || name === oldName) return;
+    if (isReservedName(name)) {
+      showStatus('err', 'That preset name is reserved — pick another.');
+      return;
+    }
+    var me = currentProfile();
+    var srcOwner = String(p.owner || '').trim();
+    var caseOnly = name.toLowerCase() === oldName.toLowerCase();
+
+    function runRename(targetOwner, justForMe) {
+      presetLoadBtn.disabled = true;
+      presetLoadBtn.textContent = 'Renaming…';
+      fetchPresets(function (list, offline) {
+        presetLoadBtn.disabled = false;
+        presetLoadBtn.textContent = 'Load preset';
+        // A rename always removes/hides the old row — never run it half-way
+        // against a dead connection (same rule as Delete preset).
+        if (offline) {
+          showStatus('err', "Couldn't reach the cloud — renaming a preset needs a connection.");
+          return;
+        }
+        // Fresh-list clash check on the TARGET key. A different-scope match
+        // is fine (deliberate shadow, same as Add); rename never offers an
+        // overwrite — too easy to squash a teammate's preset from a prompt.
+        var clash = !caseOnly && list.some(function (q) {
+          return q.name.toLowerCase() === name.toLowerCase() &&
+                 String(q.owner || '').toLowerCase() === targetOwner.toLowerCase();
+        });
+        if (clash) {
+          showStatus('err', 'A preset named "' + name + '" already exists' +
+            (targetOwner ? ' in your personal presets' : '') +
+            ' — pick a different name or delete that one first.');
+          return;
+        }
+        function doneMsg() {
+          showStatus('ok', justForMe
+            ? 'Renamed to "' + name + '" for you — teammates still see "' + oldName + '".'
+            : targetOwner
+              ? 'Your personal preset is now "' + name + '".'
+              : 'Preset "' + oldName + '" is now "' + name + '" for everyone.');
+        }
+        showStatus('ok', 'Renaming "' + oldName + '" to "' + name + '"…');
+        savePresetRow(name, targetOwner, p.params.slice(), p.header || {})
+          .then(function () {
+            // Case-only rename: the save above hit the same (name, owner)
+            // row and already rewrote its stored name — nothing to remove.
+            if (caseOnly) { doneMsg(); return; }
+            var delOwner = justForMe ? me : srcOwner;
+            var delTombstone = justForMe ? true : (srcOwner ? false : !!p.builtin);
+            deletePresetRow(oldName, delOwner, delTombstone)
+              .then(doneMsg)
+              .catch(function () {
+                showStatus('err', '"' + name + '" was saved, but the old "' + oldName +
+                  '" couldn\'t be removed — use Delete preset on it when you have signal.');
+              });
+          })
+          .catch(presetErrStatus("Couldn't rename the preset — check signal and try again."));
+      });
+    }
+
+    if (srcOwner) {
+      // My personal preset — renaming affects only me.
+      runRename(srcOwner, false);
+    } else if (me) {
+      renderPresetChooser('Rename "' + oldName + '" to "' + name + '"…', [
+        { label: 'For everyone', sub: 'the whole team sees the new name',
+          fn: function () { runRename('', false); } },
+        { label: 'Just for me', sub: 'your renamed copy — teammates keep "' + oldName + '"',
+          fn: function () { runRename(me, true); } }
+      ]);
+    } else {
+      if (!window.confirm('Rename "' + oldName + '" to "' + name + '" for everyone?')) return;
+      runRename('', false);
+    }
+  }
+
+  function duplicatePresetFlow(p) {
+    closePresetPicker();
+    clearStatus();
+    var srcName = p.name;
+    var name = window.prompt('Name for the copy of "' + srcName + '":', srcName + ' copy');
+    if (name == null) return;
+    name = name.trim().slice(0, 80);
+    if (!name) return;
+    if (isReservedName(name)) {
+      showStatus('err', 'That preset name is reserved — pick another.');
+      return;
+    }
+
+    function runCopy(scope) {
+      presetLoadBtn.disabled = true;
+      presetLoadBtn.textContent = 'Checking…';
+      fetchPresets(function (list, offline) {
+        presetLoadBtn.disabled = false;
+        presetLoadBtn.textContent = 'Load preset';
+        // Same-scope name already taken (including the source itself):
+        // block instead of offering an overwrite from inside a copy flow.
+        var exists = list.some(function (q) {
+          return q.name.toLowerCase() === name.toLowerCase() &&
+                 String(q.owner || '').toLowerCase() === scope.toLowerCase();
+        });
+        if (exists) {
+          showStatus('err', 'A preset named "' + name + '" already exists' +
+            (scope ? ' in your personal presets' : '') + ' — pick a different name.');
+          return;
+        }
+        if (offline &&
+            !window.confirm("Couldn't check the shared list (no signal). Save the copy \"" + name +
+              '" anyway? If ' + (scope ? 'you' : 'a teammate') + ' already used this name, it will be overwritten.')) return;
+        showStatus('ok', 'Saving copy "' + name + '"…');
+        savePresetRow(name, scope, p.params.slice(), p.header || {})
+          .then(function () {
+            showStatus('ok', 'Preset "' + name + '" created as a copy of "' + srcName +
+              '"' + (scope ? ' (personal)' : '') +
+              ' — Load it, tweak the parameters, then Overwrite preset to save.');
+          })
+          .catch(presetErrStatus("Couldn't save the copy — check signal and try again."));
+      });
+    }
+
+    var prof = currentProfile();
+    if (prof) {
+      renderPresetChooser('Who should see "' + name + '"?', [
+        { label: 'Just me (' + prof + ')', sub: 'personal — follows your profile on every device',
+          fn: function () { runCopy(prof); } },
+        { label: 'The whole team', sub: 'shared — everyone gets it',
+          fn: function () { runCopy(''); } }
+      ]);
+    } else {
+      runCopy('');
+    }
   }
 
   var presetLoadBtn = document.getElementById('preset-load-btn');
@@ -2691,7 +2875,10 @@ var CONFIG = {
               ' with preset "' + p.name + '"?')) return;
         applyPreset(p);
         closePresetPicker();
-      });
+      }, [
+        { label: 'Rename', fn: renamePresetFlow },
+        { label: 'Copy', fn: duplicatePresetFlow }
+      ]);
       if (offline) showStatus('err', "Couldn't reach the cloud — showing this device's last-known presets.");
     });
   });
