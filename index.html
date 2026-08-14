@@ -64,12 +64,6 @@
     font-family:var(--font-mono);font-weight:600;font-size:12px;color:var(--tint);background:var(--tint-soft);
     padding:4px 8px;border-radius:8px;letter-spacing:0}
   .card-hint{font-size:13px;color:var(--secondary);margin-top:6px;line-height:1.45}
-  /* ---- Profile bar ---- */
-  .profile-bar{margin-top:14px;padding:12px 16px;background:var(--card);border-radius:14px;box-shadow:var(--card-shadow);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
-  .profile-bar .pb-text{font-size:14px;color:var(--ink-2);min-width:0}
-  .profile-bar .pb-name{font-weight:700;color:var(--ink)}
-  .profile-bar .sbtn{flex:0 0 auto}
-  .profile-picker{margin-top:10px}
 
   .photo-status{margin-top:12px;padding:10px 14px;border-radius:12px;font-size:13.5px;font-weight:600;background:var(--fill);color:var(--tertiary)}
   .photo-status.ok{background:var(--good-soft);color:var(--good)}
@@ -292,11 +286,6 @@
     <div class="net-chip" id="net-chip"><span class="net-dot"></span><span id="net-text">Online</span></div>
   </div>
 
-  <div class="profile-bar" id="profile-bar">
-    <span class="pb-text" id="profile-bar-text">No profile — drafts &amp; presets are shared</span>
-    <button class="sbtn" id="profile-btn" type="button">Choose profile</button>
-  </div>
-  <div class="draft-picker profile-picker" id="profile-picker" style="display:none"></div>
 
   <div class="card accent" id="card-header">
     <div class="card-title">Header</div>
@@ -581,9 +570,7 @@ var CONFIG = {
   // fallback home for the rare browser with no IndexedDB.
   var photoSaveState = 'ok';   // 'ok' | 'saving' | 'err'
   // False until the boot-time vault restore settles — gates the status line
-  // (no "No photos yet" flash over a set that's still loading) and
-  // checkCloudDraft (an auto-applied cloud draft wipes on-screen photos, so
-  // it must never run against a form whose photos haven't loaded yet).
+  // (no "No photos yet" flash over a set that's still loading).
   var vaultReady = false;
 
   function photoTotal() {
@@ -680,181 +667,11 @@ var CONFIG = {
     try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
   }
 
-  /* ============ Profiles ============
-     A profile is just a verifier's name, chosen per device and shared via a
-     roster tab so the same list appears on the phone AND the computer. It
-     scopes two things: cloud drafts (saved tagged with the profile, so "my
-     drafts" follow me between devices and never auto-load onto a teammate's
-     form) and personal presets (owner field — my presets show only for me,
-     alongside the shared ones). No profile selected = everything behaves as
-     one shared pool, exactly the pre-profile behavior. */
-  var PROFILE_KEY = 'dv-profile';
-  var PROFILES_CACHE_KEY = 'dv-profiles';
-
-  function currentProfile() {
-    try { return String(localStorage.getItem(PROFILE_KEY) || '').trim(); } catch (e) { return ''; }
-  }
-
-  function setProfile(name) {
-    name = String(name || '').trim();
-    try {
-      if (name) localStorage.setItem(PROFILE_KEY, name);
-      else localStorage.removeItem(PROFILE_KEY);
-    } catch (e) {}
-    updateProfileBar();
-    // A profile IS the verifier — prefill the sign-off name if it's blank.
-    if (name && !state.liro.name) {
-      state.liro.name = name;
-      delete defaultedFields.liroName;
-      setSignoffInputs();
-      schedulePersist();
-    }
-  }
-
-  function updateProfileBar() {
-    var t = document.getElementById('profile-bar-text');
-    var b = document.getElementById('profile-btn');
-    var p = currentProfile();
-    t.innerHTML = '';
-    if (p) {
-      t.appendChild(document.createTextNode('Working as '));
-      t.appendChild(el('span', 'pb-name', p));
-      t.appendChild(document.createTextNode(' — your drafts & presets follow this name'));
-      b.textContent = 'Change';
-    } else {
-      t.appendChild(document.createTextNode('No profile — drafts & presets are shared'));
-      b.textContent = 'Choose profile';
-    }
-  }
-
-  function cachedProfiles() {
-    try {
-      var a = JSON.parse(localStorage.getItem(PROFILES_CACHE_KEY));
-      return normalizeProfiles(a);
-    } catch (e) { return []; }
-  }
-
-  function normalizeProfiles(arr) {
-    if (!Array.isArray(arr)) return [];
-    var out = [];
-    arr.forEach(function (n) {
-      n = String(n == null ? '' : n).trim().slice(0, 60);
-      if (!n || isReservedName(n)) return;
-      if (out.some(function (x) { return x.toLowerCase() === n.toLowerCase(); })) return;
-      out.push(n);
-    });
-    return out.slice(0, 40);
-  }
-
-  /* done(list, offline) — same contract as fetchPresets. */
-  function fetchProfiles(done) {
-    var fallback = function () { done(cachedProfiles(), true); };
-    if (!CONFIG.SCRIPT_URL) { fallback(); return; }
-    fetchWithTimeout(CONFIG.SCRIPT_URL + '?profiles=1')
-      .then(function (res) { return res.json(); })
-      .then(function (out) {
-        if (out.status !== 'ok' || !Array.isArray(out.profiles)) throw new Error();
-        var list = normalizeProfiles(out.profiles);
-        try { localStorage.setItem(PROFILES_CACHE_KEY, JSON.stringify(list)); } catch (e) {}
-        done(list, false);
-      })
-      .catch(fallback);
-  }
-
-  function addProfileToCloud(name) {
-    if (!CONFIG.SCRIPT_URL) {
-      showStatus('err', 'App is not configured yet — the Apps Script URL is missing in CONFIG.');
-      return;
-    }
-    showStatus('ok', 'Adding profile "' + name + '"…');
-    fetchWithTimeout(CONFIG.SCRIPT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'addProfile', token: writeToken(), name: name })
-    })
-      .then(function (res) { return res.json(); })
-      .then(function (out) {
-        if (out.status !== 'ok') throw new Error(out.message || 'rejected');
-        var list = normalizeProfiles(Array.isArray(out.profiles) ? out.profiles : cachedProfiles().concat([name]));
-        try { localStorage.setItem(PROFILES_CACHE_KEY, JSON.stringify(list)); } catch (e) {}
-        setProfile(name);
-        showStatus('ok', 'Profile "' + name + '" added — pick it on your other devices too.');
-      })
-      .catch(function (err) {
-        showStatus('err', (err && err.message && err.message !== 'rejected')
-          ? err.message
-          : "Couldn't add the profile — check signal and try again.");
-      });
-  }
-
-  var profilePickerEl = document.getElementById('profile-picker');
-  var profileBtn = document.getElementById('profile-btn');
-  var profileReqSeq = 0;
-
-  function closeProfilePicker() {
-    profileReqSeq++;
-    profilePickerEl.style.display = 'none';
-    profilePickerEl.innerHTML = '';
-  }
-
-  profileBtn.addEventListener('click', function () {
-    clearStatus();
-    closeProfilePicker();
-    var seq = ++profileReqSeq;
-    profileBtn.disabled = true;
-    var prevLabel = profileBtn.textContent;
-    profileBtn.textContent = 'Loading…';
-    fetchProfiles(function (list, offline) {
-      profileBtn.disabled = false;
-      profileBtn.textContent = prevLabel;
-      if (seq !== profileReqSeq) return;   // superseded while in flight
-      var me = currentProfile();
-      profilePickerEl.innerHTML = '';
-      profilePickerEl.appendChild(el('div', 'draft-picker-head', 'Who is using this device?'));
-      list.forEach(function (name) {
-        var btn = el('button', 'draft-picker-item');
-        btn.type = 'button';
-        btn.appendChild(el('div', 'dp-title', name + (name.toLowerCase() === me.toLowerCase() ? ' ✓' : '')));
-        btn.addEventListener('click', function () {
-          setProfile(name);
-          closeProfilePicker();
-          showStatus('ok', 'Working as "' + name + '" on this device — drafts and presets you save now follow this name.');
-        });
-        profilePickerEl.appendChild(btn);
-      });
-      var none = el('button', 'draft-picker-item');
-      none.type = 'button';
-      none.appendChild(el('div', 'dp-title', 'No profile' + (me ? '' : ' ✓')));
-      none.appendChild(el('div', 'dp-sub', 'shared use — everything visible to everyone'));
-      none.addEventListener('click', function () {
-        setProfile('');
-        closeProfilePicker();
-        showStatus('ok', 'Profile cleared — this device is back to shared use.');
-      });
-      profilePickerEl.appendChild(none);
-      var add = el('button', 'draft-picker-item');
-      add.type = 'button';
-      add.appendChild(el('div', 'dp-title', '+ New profile…'));
-      add.addEventListener('click', function () {
-        var name = window.prompt('Your name (as teammates should see it, e.g. "Mike T."):');
-        if (name == null) return;
-        name = name.trim().slice(0, 60);
-        if (!name) return;
-        if (isReservedName(name)) { showStatus('err', 'That name is reserved — pick another.'); return; }
-        closeProfilePicker();
-        var exists = list.some(function (n) { return n.toLowerCase() === name.toLowerCase(); });
-        if (exists) { setProfile(name); showStatus('ok', 'Working as "' + name + '".'); return; }
-        addProfileToCloud(name);
-      });
-      profilePickerEl.appendChild(add);
-      var cancel = el('button', 'draft-picker-cancel', 'Cancel');
-      cancel.type = 'button';
-      cancel.addEventListener('click', closeProfilePicker);
-      profilePickerEl.appendChild(cancel);
-      profilePickerEl.style.display = 'block';
-      if (offline) showStatus('err', "Couldn't reach the cloud — showing this device's last-known profiles.");
-    });
-  });
+  /* Profiles (per-device verifier identity scoping drafts and presets) were
+     REMOVED 2026-08-14 at Michael's request — everything is one shared pool
+     again. The server still understands the profile/owner plumbing (roster
+     tab, ?profiles=1, personal preset rows), it's just never called: rows
+     with an owner never surface, and every preset write is shared. */
 
   var CHECK_GROUP_KEYS = ['Identity', 'Condition', 'Documents'];
 
@@ -1411,17 +1228,12 @@ var CONFIG = {
      sync and stay on the device that took them; a successful Submit clears
      the shared draft. */
   function cloudDraft() {
-    // text fields only — no photos. owner tags the draft with this device's
-    // profile ('' = shared): it rides inside the stored JSON, groups the
-    // picker into "My drafts" / "Team drafts", and keeps auto-apply from
-    // loading a teammate's draft over this device's form.
-    var d = { header: state.header, checks: state.checks, params: state.params, liro: state.liro, con: state.con, overall: state.overall };
-    var p = currentProfile();
-    if (p) d.owner = p;
-    return d;
+    // text fields only — no photos.
+    return { header: state.header, checks: state.checks, params: state.params, liro: state.liro, con: state.con, overall: state.overall };
   }
 
-  /** Owner tag stored in a cloud draft, '' for legacy/shared drafts. */
+  /** Owner tag a profile-era cloud draft may still carry — shown as
+   *  provenance in the picker, otherwise unused. */
   function draftOwner(draft) {
     return String((draft && draft.owner) || '').trim();
   }
@@ -1450,8 +1262,6 @@ var CONFIG = {
     if (state.overall) return false;
     return true;
   }
-
-  var lastCloudCheck = 0;
 
   function fmtDate(iso) {
     if (!iso) return '';
@@ -1573,53 +1383,29 @@ var CONFIG = {
       draftPickerEl.appendChild(subAll);
     }
 
-    // With a profile selected the cloud section splits: this profile's own
-    // drafts first (the cross-device "fill at the desk, open at the dock"
-    // flow), then everyone else's. Without a profile: one shared list,
-    // exactly the pre-profile behavior.
-    var me = currentProfile();
-    function cloudItem(entry, showOwner) {
+    // One shared cloud list. A profile-era draft that still carries an owner
+    // tag shows it as provenance ('· Mike T.') so it's clear whose work it is.
+    function cloudItem(entry) {
       var lbl = draftLabel(entry.draft);
       var btn = el('button', 'draft-picker-item');
       btn.type = 'button';
       btn.appendChild(el('div', 'dp-title', lbl.title));
       var own = draftOwner(entry.draft);
       var subText = (lbl.sub ? lbl.sub + ' — ' : '') + 'saved ' + (fmtDate(entry.savedAt) || 'time unknown') +
-        (showOwner && own ? ' · ' + own : '');
+        (own ? ' · ' + own : '');
       btn.appendChild(el('div', 'dp-sub', subText));
       btn.addEventListener('click', function () { chooseCloudDraft(entry); });
       draftPickerEl.appendChild(btn);
     }
-    var mine = [], team = [];
-    cloudList.forEach(function (entry) {
-      if (me && draftOwner(entry.draft).toLowerCase() === me.toLowerCase()) mine.push(entry);
-      else team.push(entry);
-    });
-    if (me) {
-      draftPickerEl.appendChild(el('div', 'draft-picker-head', 'My cloud drafts — ' + me));
-      if (view.cloudPending) {
-        draftPickerEl.appendChild(el('div', 'dp-note', 'Checking the cloud…'));
-      } else if (view.cloudErr) {
-        draftPickerEl.appendChild(el('div', 'dp-note', "Couldn't reach the cloud — drafts on this phone still work."));
-      } else {
-        if (!mine.length) draftPickerEl.appendChild(el('div', 'dp-note', 'No cloud drafts saved as ' + me + '.'));
-        mine.forEach(function (entry) { cloudItem(entry, false); });
-        if (team.length) {
-          draftPickerEl.appendChild(el('div', 'draft-picker-head', 'Team drafts'));
-          team.forEach(function (entry) { cloudItem(entry, true); });
-        }
-      }
+    draftPickerEl.appendChild(el('div', 'draft-picker-head', 'Cloud (all devices)'));
+    if (view.cloudPending) {
+      draftPickerEl.appendChild(el('div', 'dp-note', 'Checking the cloud…'));
+    } else if (view.cloudErr) {
+      draftPickerEl.appendChild(el('div', 'dp-note', "Couldn't reach the cloud — drafts on this phone still work."));
+    } else if (!cloudList.length) {
+      draftPickerEl.appendChild(el('div', 'dp-note', 'No cloud drafts.'));
     } else {
-      draftPickerEl.appendChild(el('div', 'draft-picker-head', 'Cloud (all devices)'));
-      if (view.cloudPending) {
-        draftPickerEl.appendChild(el('div', 'dp-note', 'Checking the cloud…'));
-      } else if (view.cloudErr) {
-        draftPickerEl.appendChild(el('div', 'dp-note', "Couldn't reach the cloud — drafts on this phone still work."));
-      } else if (!cloudList.length) {
-        draftPickerEl.appendChild(el('div', 'dp-note', 'No cloud drafts.'));
-      } else {
-        cloudList.forEach(function (entry) { cloudItem(entry, true); });
-      }
+      cloudList.forEach(function (entry) { cloudItem(entry); });
     }
 
     var cancel = el('button', 'draft-picker-cancel', 'Cancel');
@@ -1718,40 +1504,11 @@ var CONFIG = {
       .catch(function () { fail(); });
   }
 
-  /* The quiet automatic check (page load, returning to the app): applies the
-     newest cloud draft only over an untouched form, otherwise just hints
-     that saved drafts exist. The Load button opens the picker instead
-     (openDraftPicker above). */
-  function checkCloudDraft() {
-    // Never before the photo vault has loaded: an auto-applied cloud draft
-    // wipes on-screen photos, and "no photos yet" during the restore window
-    // would make a photo-carrying form look pristine.
-    if (!vaultReady) return;
-    var now = Date.now();
-    if (now - lastCloudCheck < 15000) return;
-    lastCloudCheck = now;
-    fetchCloudDrafts(function (list) {
-      if (!list.length) return;
-      // With a profile: only THIS profile's drafts may auto-apply — a
-      // teammate's draft must never quietly take over the form. Without
-      // one: the whole list, exactly the pre-profile behavior.
-      var me = currentProfile();
-      var mine = me
-        ? list.filter(function (d) { return draftOwner(d.draft).toLowerCase() === me.toLowerCase(); })
-        : list;
-      if (isPristine()) {
-        if (mine.length) {
-          applyCloudDraft(mine[0].draft, mine[0].savedAt);
-        } else {
-          showStatus('ok', (list.length > 1 ? list.length + ' team drafts' : 'A team draft') +
-            ' in the cloud — tap "Load draft" to look.');
-        }
-      } else if (mine.length && JSON.stringify(cloudDraft()) !== JSON.stringify(mine[0].draft)) {
-        showStatus('ok', (list.length > 1 ? list.length + ' saved drafts' : 'A saved draft') +
-          ' available — tap "Load draft" to choose.');
-      }
-    }, function () {});
-  }
+  /* The quiet automatic cloud-draft check (page load, returning to the app)
+     was REMOVED 2026-08-14 at Michael's request: opening the app on another
+     device must always start empty, and cloud content only ever arrives
+     through an explicit "Load draft" tap — so nobody's in-progress work gets
+     quietly replaced with someone else's. */
 
   /* ============ Shared materials list ("hard save" board) ============
      A material you know is coming gets pre-filled and staged on a SHARED,
@@ -2377,14 +2134,11 @@ var CONFIG = {
     return out;
   }
 
-  /* Defaults first (stable order), then the stored presets THIS device may
-     see: shared rows (owner '') and the current profile's personal rows —
-     other profiles' personal presets never surface here. Shared rows are
-     applied before personal ones, so a personal preset (or personal hide
-     marker) always wins a name collision — that's what makes "my version of
-     Panelboard" and "hide Loadbank just for me" work. */
+  /* Defaults first (stable order), then the stored SHARED rows (owner '').
+     Profile-era personal rows and personal hide markers (owner set) never
+     apply — with profiles removed there is no "me" for them to follow. A
+     shared tombstone still hides its built-in default for everyone. */
   function mergePresets(custom) {
-    var me = currentProfile().toLowerCase();
     var out = [];
     // Null-prototype map so a name like "__proto__" is an ordinary key, not
     // a path to Object.prototype (defense-in-depth alongside isReservedName).
@@ -2419,10 +2173,6 @@ var CONFIG = {
       }
     }
     custom.forEach(function (p) { if (!(p.owner || '')) applyOne(p); });
-    custom.forEach(function (p) {
-      var o = String(p.owner || '').toLowerCase();
-      if (o && me && o === me) applyOne(p);
-    });
     return out;
   }
 
@@ -2484,7 +2234,6 @@ var CONFIG = {
         btn.appendChild(el('div', 'dp-title', item.short));
         btn.appendChild(el('div', 'dp-sub',
           p.params.length + (p.params.length === 1 ? ' parameter' : ' parameters') +
-          (p.owner ? ' · personal' : '') +
           (p.header ? ' · fills submittal/model' : '')));
         btn.addEventListener('click', function () { onPick(p); });
         // Optional per-row action buttons (the Load picker's Rename / Copy)
@@ -2560,9 +2309,9 @@ var CONFIG = {
     return prof;
   }
 
-  /* owner '' = shared with the whole team; a profile name = personal to
-     that profile. Storage rows are keyed by (name, owner) on the server,
-     and the offline cache mirrors that. */
+  /* Every preset write is shared (owner '') — the owner param survives on
+     the row helpers only because the server keys rows by (name, owner) and
+     the offline cache mirrors that. */
 
   /* Cloud write + offline-cache sync for one preset row. No status
      messages — callers narrate. Resolves on 'ok', rejects with the server's
@@ -2614,32 +2363,25 @@ var CONFIG = {
     };
   }
 
-  function savePresetToCloud(name, owner) {
-    owner = String(owner || '').trim();
+  function savePresetToCloud(name) {
     var params = currentParamNames();
     if (!params.length) {
       showStatus('err', 'Name at least one parameter before saving it to a preset.');
       return;
     }
     showStatus('ok', 'Saving preset "' + name + '"…');
-    savePresetRow(name, owner, params, currentPresetHeader())
+    savePresetRow(name, '', params, currentPresetHeader())
       .then(function () {
-        showStatus('ok', owner
-          ? 'Preset "' + name + '" saved as your personal preset — it follows "' + owner + '" on every device.'
-          : 'Preset "' + name + '" saved — it\'s now available to everyone.');
+        showStatus('ok', 'Preset "' + name + '" saved — it\'s now available to everyone.');
       })
       .catch(presetErrStatus("Couldn't save the preset — check signal and try again."));
   }
 
-  /* Three shapes of delete, all keyed by (name, owner) on the server:
-     - personal preset (owner = my profile, tombstone false): row removed,
-       gone for me only (a shared/built-in preset it shadowed resurfaces).
-     - shared preset for everyone (owner '', tombstone = whether the name is
-       a built-in default): row removed, or a shared hide marker for a
-       built-in that would otherwise come back baked into the app.
-     - hide a shared/built-in preset just for me (owner = my profile,
-       tombstone true): a personal hide marker — everyone else keeps it.
-     "Add preset" with the same name and scope later revives any of them. */
+  /* Delete is always for everyone (owner ''): the stored row is removed, or
+     — for a built-in default that would otherwise come back baked into the
+     app — a tombstone hide-marker row is written instead. "Add preset" with
+     the same name later revives either. deletePresetRow keeps the owner
+     param to mirror the server API. */
   function deletePresetRow(name, owner, tombstone) {
     if (!CONFIG.SCRIPT_URL) {
       return Promise.reject(new Error('App is not configured yet — the Apps Script URL is missing in CONFIG.'));
@@ -2664,49 +2406,24 @@ var CONFIG = {
       });
   }
 
-  function deletePresetFromCloud(name, owner, tombstone) {
-    owner = String(owner || '').trim();
-    showStatus('ok', (tombstone && owner ? 'Hiding' : 'Deleting') + ' preset "' + name + '"…');
-    deletePresetRow(name, owner, tombstone)
+  function deletePresetFromCloud(name, tombstone) {
+    showStatus('ok', 'Deleting preset "' + name + '"…');
+    deletePresetRow(name, '', tombstone)
       .then(function () {
-        showStatus('ok', tombstone && owner
-          ? 'Preset "' + name + '" hidden for you — teammates still see it.'
-          : owner
-            ? 'Your personal preset "' + name + '" is deleted.'
-            : 'Preset "' + name + '" deleted for everyone.');
+        showStatus('ok', 'Preset "' + name + '" deleted for everyone.');
       })
       .catch(presetErrStatus("Couldn't delete the preset — check signal and try again."));
-  }
-
-  /* Two-option chooser rendered in the preset picker (used where a binary
-     window.confirm can't offer a real choice + cancel). */
-  function renderPresetChooser(heading, options) {
-    presetPickerEl.innerHTML = '';
-    presetPickerEl.appendChild(el('div', 'draft-picker-head', heading));
-    options.forEach(function (o) {
-      var btn = el('button', 'draft-picker-item');
-      btn.type = 'button';
-      btn.appendChild(el('div', 'dp-title', o.label));
-      if (o.sub) btn.appendChild(el('div', 'dp-sub', o.sub));
-      btn.addEventListener('click', function () { closePresetPicker(); o.fn(); });
-      presetPickerEl.appendChild(btn);
-    });
-    var cancel = el('button', 'draft-picker-cancel', 'Cancel');
-    cancel.type = 'button';
-    cancel.addEventListener('click', closePresetPicker);
-    presetPickerEl.appendChild(cancel);
-    presetPickerEl.style.display = 'block';
   }
 
   /* ============ Rename / Copy (Load-picker row actions) ============
      Both are composed from the two writes the live backend already has:
      rename = save the same parameter list under the new name, then remove
-     (or hide) the old row; copy = save a duplicate under the new name — no
-     new server action, so an old server can't misroute either one. Scope
-     rules mirror Delete/Add: a personal preset renames for me only; a
-     shared/built-in one offers "everyone" vs "just me" when a profile is
-     set. A case-only rename ("panelboard" → "Panelboard") is a single
-     upsert — same storage key on the server, so nothing to delete. */
+     (or tombstone, for a built-in) the old row; copy = save a duplicate
+     under the new name — no new server action, so an old server can't
+     misroute either one. Everything is shared: a rename or copy is for the
+     whole team, always. A case-only rename ("panelboard" → "Panelboard")
+     is a single upsert — same storage key on the server, nothing to
+     delete. */
   function renamePresetFlow(p) {
     closePresetPicker();
     clearStatus();
@@ -2719,75 +2436,48 @@ var CONFIG = {
       showStatus('err', 'That preset name is reserved — pick another.');
       return;
     }
-    var me = currentProfile();
-    var srcOwner = String(p.owner || '').trim();
     var caseOnly = name.toLowerCase() === oldName.toLowerCase();
+    if (!window.confirm('Rename "' + oldName + '" to "' + name + '" for everyone?')) return;
 
-    function runRename(targetOwner, justForMe) {
-      presetLoadBtn.disabled = true;
-      presetLoadBtn.textContent = 'Renaming…';
-      fetchPresets(function (list, offline) {
-        presetLoadBtn.disabled = false;
-        presetLoadBtn.textContent = 'Load preset';
-        // A rename always removes/hides the old row — never run it half-way
-        // against a dead connection (same rule as Delete preset).
-        if (offline) {
-          showStatus('err', "Couldn't reach the cloud — renaming a preset needs a connection.");
-          return;
-        }
-        // Fresh-list clash check on the TARGET key. A different-scope match
-        // is fine (deliberate shadow, same as Add); rename never offers an
-        // overwrite — too easy to squash a teammate's preset from a prompt.
-        var clash = !caseOnly && list.some(function (q) {
-          return q.name.toLowerCase() === name.toLowerCase() &&
-                 String(q.owner || '').toLowerCase() === targetOwner.toLowerCase();
-        });
-        if (clash) {
-          showStatus('err', 'A preset named "' + name + '" already exists' +
-            (targetOwner ? ' in your personal presets' : '') +
-            ' — pick a different name or delete that one first.');
-          return;
-        }
-        function doneMsg() {
-          showStatus('ok', justForMe
-            ? 'Renamed to "' + name + '" for you — teammates still see "' + oldName + '".'
-            : targetOwner
-              ? 'Your personal preset is now "' + name + '".'
-              : 'Preset "' + oldName + '" is now "' + name + '" for everyone.');
-        }
-        showStatus('ok', 'Renaming "' + oldName + '" to "' + name + '"…');
-        savePresetRow(name, targetOwner, p.params.slice(), p.header || {})
-          .then(function () {
-            // Case-only rename: the save above hit the same (name, owner)
-            // row and already rewrote its stored name — nothing to remove.
-            if (caseOnly) { doneMsg(); return; }
-            var delOwner = justForMe ? me : srcOwner;
-            var delTombstone = justForMe ? true : (srcOwner ? false : !!p.builtin);
-            deletePresetRow(oldName, delOwner, delTombstone)
-              .then(doneMsg)
-              .catch(function () {
-                showStatus('err', '"' + name + '" was saved, but the old "' + oldName +
-                  '" couldn\'t be removed — use Delete preset on it when you have signal.');
-              });
-          })
-          .catch(presetErrStatus("Couldn't rename the preset — check signal and try again."));
+    presetLoadBtn.disabled = true;
+    presetLoadBtn.textContent = 'Renaming…';
+    fetchPresets(function (list, offline) {
+      presetLoadBtn.disabled = false;
+      presetLoadBtn.textContent = 'Load preset';
+      // A rename always removes the old row — never run it half-way
+      // against a dead connection (same rule as Delete preset).
+      if (offline) {
+        showStatus('err', "Couldn't reach the cloud — renaming a preset needs a connection.");
+        return;
+      }
+      // Fresh-list clash check; rename never offers an overwrite — too
+      // easy to squash a teammate's preset from a prompt.
+      var clash = !caseOnly && list.some(function (q) {
+        return q.name.toLowerCase() === name.toLowerCase();
       });
-    }
-
-    if (srcOwner) {
-      // My personal preset — renaming affects only me.
-      runRename(srcOwner, false);
-    } else if (me) {
-      renderPresetChooser('Rename "' + oldName + '" to "' + name + '"…', [
-        { label: 'For everyone', sub: 'the whole team sees the new name',
-          fn: function () { runRename('', false); } },
-        { label: 'Just for me', sub: 'your renamed copy — teammates keep "' + oldName + '"',
-          fn: function () { runRename(me, true); } }
-      ]);
-    } else {
-      if (!window.confirm('Rename "' + oldName + '" to "' + name + '" for everyone?')) return;
-      runRename('', false);
-    }
+      if (clash) {
+        showStatus('err', 'A preset named "' + name + '" already exists' +
+          ' — pick a different name or delete that one first.');
+        return;
+      }
+      function doneMsg() {
+        showStatus('ok', 'Preset "' + oldName + '" is now "' + name + '" for everyone.');
+      }
+      showStatus('ok', 'Renaming "' + oldName + '" to "' + name + '"…');
+      savePresetRow(name, '', p.params.slice(), p.header || {})
+        .then(function () {
+          // Case-only rename: the save above hit the same storage row and
+          // already rewrote its stored name — nothing to remove.
+          if (caseOnly) { doneMsg(); return; }
+          deletePresetRow(oldName, '', !!p.builtin)
+            .then(doneMsg)
+            .catch(function () {
+              showStatus('err', '"' + name + '" was saved, but the old "' + oldName +
+                '" couldn\'t be removed — use Delete preset on it when you have signal.');
+            });
+        })
+        .catch(presetErrStatus("Couldn't rename the preset — check signal and try again."));
+    });
   }
 
   function duplicatePresetFlow(p) {
@@ -2803,48 +2493,31 @@ var CONFIG = {
       return;
     }
 
-    function runCopy(scope) {
-      presetLoadBtn.disabled = true;
-      presetLoadBtn.textContent = 'Checking…';
-      fetchPresets(function (list, offline) {
-        presetLoadBtn.disabled = false;
-        presetLoadBtn.textContent = 'Load preset';
-        // Same-scope name already taken (including the source itself):
-        // block instead of offering an overwrite from inside a copy flow.
-        var exists = list.some(function (q) {
-          return q.name.toLowerCase() === name.toLowerCase() &&
-                 String(q.owner || '').toLowerCase() === scope.toLowerCase();
-        });
-        if (exists) {
-          showStatus('err', 'A preset named "' + name + '" already exists' +
-            (scope ? ' in your personal presets' : '') + ' — pick a different name.');
-          return;
-        }
-        if (offline &&
-            !window.confirm("Couldn't check the shared list (no signal). Save the copy \"" + name +
-              '" anyway? If ' + (scope ? 'you' : 'a teammate') + ' already used this name, it will be overwritten.')) return;
-        showStatus('ok', 'Saving copy "' + name + '"…');
-        savePresetRow(name, scope, p.params.slice(), p.header || {})
-          .then(function () {
-            showStatus('ok', 'Preset "' + name + '" created as a copy of "' + srcName +
-              '"' + (scope ? ' (personal)' : '') +
-              ' — Load it, tweak the parameters, then Overwrite preset to save.');
-          })
-          .catch(presetErrStatus("Couldn't save the copy — check signal and try again."));
+    presetLoadBtn.disabled = true;
+    presetLoadBtn.textContent = 'Checking…';
+    fetchPresets(function (list, offline) {
+      presetLoadBtn.disabled = false;
+      presetLoadBtn.textContent = 'Load preset';
+      // Name already taken (including the source itself): block instead of
+      // offering an overwrite from inside a copy flow.
+      var exists = list.some(function (q) {
+        return q.name.toLowerCase() === name.toLowerCase();
       });
-    }
-
-    var prof = currentProfile();
-    if (prof) {
-      renderPresetChooser('Who should see "' + name + '"?', [
-        { label: 'Just me (' + prof + ')', sub: 'personal — follows your profile on every device',
-          fn: function () { runCopy(prof); } },
-        { label: 'The whole team', sub: 'shared — everyone gets it',
-          fn: function () { runCopy(''); } }
-      ]);
-    } else {
-      runCopy('');
-    }
+      if (exists) {
+        showStatus('err', 'A preset named "' + name + '" already exists — pick a different name.');
+        return;
+      }
+      if (offline &&
+          !window.confirm("Couldn't check the shared list (no signal). Save the copy \"" + name +
+            '" anyway? If a teammate already used this name, it will be overwritten.')) return;
+      showStatus('ok', 'Saving copy "' + name + '"…');
+      savePresetRow(name, '', p.params.slice(), p.header || {})
+        .then(function () {
+          showStatus('ok', 'Preset "' + name + '" created as a copy of "' + srcName +
+            '" — Load it, tweak the parameters, then Overwrite preset to save.');
+        })
+        .catch(presetErrStatus("Couldn't save the copy — check signal and try again."));
+    });
   }
 
   var presetLoadBtn = document.getElementById('preset-load-btn');
@@ -2909,16 +2582,12 @@ var CONFIG = {
           showStatus('err', 'Name at least one parameter before saving it to a preset.');
           return;
         }
-        // Scope follows the preset being overwritten: a personal preset
-        // stays personal, a shared/built-in one stays shared.
-        var scope = String(p.owner || '').trim();
         var ok = window.confirm('Overwrite preset "' + p.name + '" with the current ' +
           params.length + (params.length === 1 ? ' parameter' : ' parameters') +
-          (scope ? '? This changes your personal preset on all your devices.'
-                 : '? This changes it permanently for everyone.'));
+          '? This changes it permanently for everyone.');
         if (!ok) return;
         closePresetPicker();
-        savePresetToCloud(p.name, scope);
+        savePresetToCloud(p.name);
       });
     });
   });
@@ -2943,41 +2612,25 @@ var CONFIG = {
     // Check the FRESH shared list, not just this device's cache: a phone that
     // hasn't loaded presets recently would otherwise skip the "already
     // exists" warning and silently overwrite a teammate's same-named preset
-    // (the server upserts by name+scope).
-    function addWithScope(scope) {
-      presetAddBtn.disabled = true;
-      presetAddBtn.textContent = 'Checking…';
-      fetchPresets(function (list, offline) {
-        presetAddBtn.disabled = false;
-        presetAddBtn.textContent = 'Add preset';
-        // Only a same-name entry in the SAME scope is an overwrite; a
-        // personal preset named like a shared one is a deliberate shadow.
-        var exists = list.some(function (p) {
-          return p.name.toLowerCase() === name.toLowerCase() &&
-                 String(p.owner || '').toLowerCase() === scope.toLowerCase();
-        });
-        if (exists) {
-          if (!window.confirm('A preset named "' + name + '"' +
-              (offline ? " exists on this device's last-known list" : ' already exists') +
-              (scope ? ' in your personal presets' : '') + ' — overwrite it?')) return;
-        } else if (offline) {
-          if (!window.confirm("Couldn't check the shared list (no signal). Save \"" + name +
-              '" anyway? If ' + (scope ? 'you' : 'a teammate') + ' already used this name, it will be overwritten.')) return;
-        }
-        savePresetToCloud(name, scope);
+    // (the server upserts by name).
+    presetAddBtn.disabled = true;
+    presetAddBtn.textContent = 'Checking…';
+    fetchPresets(function (list, offline) {
+      presetAddBtn.disabled = false;
+      presetAddBtn.textContent = 'Add preset';
+      var exists = list.some(function (p) {
+        return p.name.toLowerCase() === name.toLowerCase();
       });
-    }
-    var prof = currentProfile();
-    if (prof) {
-      renderPresetChooser('Who should see "' + name + '"?', [
-        { label: 'Just me (' + prof + ')', sub: 'personal — follows your profile on every device',
-          fn: function () { addWithScope(prof); } },
-        { label: 'The whole team', sub: 'shared — everyone gets it',
-          fn: function () { addWithScope(''); } }
-      ]);
-    } else {
-      addWithScope('');
-    }
+      if (exists) {
+        if (!window.confirm('A preset named "' + name + '"' +
+            (offline ? " exists on this device's last-known list" : ' already exists') +
+            ' — overwrite it?')) return;
+      } else if (offline) {
+        if (!window.confirm("Couldn't check the shared list (no signal). Save \"" + name +
+            '" anyway? If a teammate already used this name, it will be overwritten.')) return;
+      }
+      savePresetToCloud(name);
+    });
   });
 
   presetDeleteBtn.addEventListener('click', function () {
@@ -2999,32 +2652,10 @@ var CONFIG = {
         return;
       }
       renderPresetPicker(list, function (p) {
-        var me = currentProfile();
-        var scope = String(p.owner || '').trim();
-        if (scope) {
-          // My personal preset — deleting affects only me.
-          if (!window.confirm('Delete your personal preset "' + p.name + '"?' +
-              (p.builtin ? ' The standard version comes back for you.' : ''))) return;
-          closePresetPicker();
-          deletePresetFromCloud(p.name, scope, false);
-        } else if (me) {
-          // Shared or built-in, and I have a profile: hide for me, or
-          // delete for the whole team.
-          renderPresetChooser('Delete "' + p.name + '"…', [
-            { label: 'Hide it just for me', sub: 'teammates keep it; re-add the name to bring it back',
-              fn: function () { deletePresetFromCloud(p.name, me, true); } },
-            { label: 'Delete it for everyone', sub: 'cannot be undone (re-adding the name brings it back)',
-              fn: function () {
-                if (!window.confirm('Delete preset "' + p.name + '" for EVERYONE?')) return;
-                deletePresetFromCloud(p.name, '', !!p.builtin);
-              } }
-          ]);
-        } else {
-          if (!window.confirm('Delete preset "' + p.name + '" for everyone? ' +
-              'This cannot be undone (re-adding a preset with the same name brings it back).')) return;
-          closePresetPicker();
-          deletePresetFromCloud(p.name, '', !!p.builtin);
-        }
+        if (!window.confirm('Delete preset "' + p.name + '" for everyone? ' +
+            'This cannot be undone (re-adding a preset with the same name brings it back).')) return;
+        closePresetPicker();
+        deletePresetFromCloud(p.name, !!p.builtin);
       });
     });
   });
@@ -3932,27 +3563,14 @@ var CONFIG = {
   if (navigator.storage && navigator.storage.persist) {
     try { navigator.storage.persist().catch(function () {}); } catch (e) {}
   }
-  updateProfileBar();
   loadDraft();
   applyDefaults();
   renderAll();
   setSignoffInputs();
   updateVisuals();
-  // Photos load from the vault after first paint; the cloud-draft check
-  // waits for them (it auto-applies over a "pristine" form, and pristine
-  // can't be judged while photos are still loading).
-  restorePhotoVault(function () { checkCloudDraft(); });
-
-  // Returning to the app (home-screen resume, tab switch) re-checks quietly,
-  // so a draft saved at the desk shows up without a manual refresh.
-  document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') checkCloudDraft();
-  });
-  // Some browsers restore the page from bfcache (e.g. swiping back) without
-  // firing visibilitychange — pageshow with persisted:true catches that.
-  window.addEventListener('pageshow', function (ev) {
-    if (ev.persisted) checkCloudDraft();
-  });
+  // Photos load from the vault after first paint. No cloud fetch happens at
+  // boot — cloud drafts arrive only through an explicit "Load draft" tap.
+  restorePhotoVault(function () {});
 })();
 </script>
 </body>
